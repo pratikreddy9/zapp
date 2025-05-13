@@ -10,26 +10,9 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ========== PROMPT ==========
 MASTER_PROMPT = """
-You are a resume search assistant. When a user types a natural query, return either:
-- A follow-up question if more info is needed
-- Or a tool call to search MongoDB using structured JSON
+You are a resume search assistant. Given a user query, either ask clarifying questions or call a tool that searches MongoDB resumes using:
 
-The database contains resumes with:
-- Fields: resumeId, name, email, contactNo, address, country
-- Lists: educationalQualifications[], jobExperiences[], keywords[], skills[]
-
-country is case-insensitive and normalized using .strip().lower().
-Experience is in jobExperiences[].duration (convert numeric strings to int).
-skills must match both skills[].skillName and keywords[].
-Always return structured JSON using the schema if tool call is needed.
-
-Normalize and expand:
-- "SQL" → ["SQL", "sql", "mysql", "microsoft sql server"]
-- "JavaScript" → ["JavaScript", "javascript", "js", "java script"]
-- "Software Developer" → ["Software Developer", "software dev", "softwaredeveloper", "software engineer"]
-
-Return structured JSON with key:
-"query_parameters": {
+{
   "country": "...",
   "min_experience_years": ...,
   "max_experience_years": ...,
@@ -37,6 +20,19 @@ Return structured JSON with key:
   "skills": [...],
   "top_k": ...
 }
+
+Resume structure includes:
+- Fields: resumeId, name, email, contactNo, address, country (normalized lowercase)
+- Lists: educationalQualifications[], jobExperiences[], keywords[], skills[].skillName
+
+Match skills with both `skills[].skillName` and `keywords`. Normalize casing and spacing.
+
+Expand:
+- "SQL" → ["SQL", "sql", "mysql", "microsoft sql server"]
+- "Python" → ["Python", "python"]
+- "Software Developer" → ["Software Developer", "software dev", "softwaredeveloper", "software engineer"]
+
+Always use `response_format={"type": "json_object"}`.
 """
 
 # ========== MONGO SEARCH ==========
@@ -58,6 +54,9 @@ def search_resumes(params):
     job_titles = params.get("job_titles", [])
     skills = params.get("skills", [])
     top_k = params.get("top_k", 50)
+
+    if isinstance(top_k, str) and top_k.isdigit():
+        top_k = int(top_k)
 
     if isinstance(min_exp, str) and min_exp.isdigit():
         min_exp = int(min_exp)
@@ -87,25 +86,26 @@ def search_resumes(params):
     client.close()
     return results
 
-# ========== STATE INIT ==========
+# ========== STREAMLIT STATE ==========
 if "chat" not in st.session_state:
     st.session_state.chat = []
 if "results" not in st.session_state:
     st.session_state.results = []
+if "last_query_pending" not in st.session_state:
+    st.session_state.last_query_pending = None
 
-# ========== UI CHAT RENDER ==========
-st.title("🧠 Resume Agent")
+# ========== CHAT UI ==========
+st.title("🤖 Resume Agent")
 
 for msg in st.session_state.chat:
-    style = "background:#ffecec;" if msg["role"] == "user" else "background:#eaffea;"
+    bg = "#ffecec" if msg["role"] == "user" else "#eaffea"
     st.markdown(
-        f"<div style='{style} padding:10px; border-radius:8px; margin:5px 0'>{msg['content']}</div>",
+        f"<div style='background:{bg};padding:10px;border-radius:8px;margin:5px 0'>{msg['content']}</div>",
         unsafe_allow_html=True
     )
 
-# ========== RESUME CARDS ==========
 if st.session_state.results:
-    st.markdown("### ✅ Matches")
+    st.markdown("### 🔍 Matching Resumes")
     for r in st.session_state.results:
         st.markdown(
             f"""
@@ -114,7 +114,7 @@ if st.session_state.results:
             📧 {r.get("email", "N/A")}<br>
             📱 {r.get("contactNo", "N/A")}<br>
             🌍 {r.get("country", "N/A")}<br>
-            🛠️ Skills: {", ".join([s.get("skillName", "") for s in r.get("skills", [])])}<br>
+            🛠 Skills: {", ".join(s.get("skillName", "") for s in r.get("skills", []))}<br>
             🔑 Keywords: {", ".join(r.get("keywords", []))}
             </div>
             """,
@@ -122,20 +122,26 @@ if st.session_state.results:
         )
 
 # ========== INPUT ==========
-user_input = st.text_input("Type your query:")
-
+user_input = st.text_input("Ask your query:")
 if user_input:
     st.session_state.chat.append({"role": "user", "content": user_input})
+    st.session_state.last_query_pending = user_input
+    st.rerun()
+
+# ========== GPT + TOOL CALL ==========
+if st.session_state.last_query_pending:
+    query = st.session_state.last_query_pending
+    st.session_state.last_query_pending = None
 
     messages = [{"role": "system", "content": MASTER_PROMPT}]
     for m in st.session_state.chat:
         messages.append({"role": m["role"], "content": m["content"]})
 
-    tool_schema = [{
+    tools = [{
         "type": "function",
         "function": {
             "name": "search_resumes",
-            "description": "Search resumes using filters",
+            "description": "Search resumes using structured filters",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -155,20 +161,28 @@ if user_input:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            tools=tool_schema,
+            tools=tools,
             tool_choice="auto",
             response_format={"type": "json_object"}
         )
 
-        reply = response.choices[0].message
+        msg = response.choices[0].message
 
-        if reply.tool_calls:
-            args = json.loads(reply.tool_calls[0].function.arguments)
+        if msg.tool_calls:
+            # Show GPT's message if available
+            if msg.content:
+                st.session_state.chat.append({"role": "assistant", "content": msg.content})
+
+            args = json.loads(msg.tool_calls[0].function.arguments)
             results = search_resumes(args)
+
+            # Save results + reply
             st.session_state.results = results
-            st.session_state.chat.append({"role": "assistant", "content": f"🔍 Found {len(results)} matches."})
+            summary = f"🔍 Found {len(results)} resumes matching your criteria."
+            st.session_state.chat.append({"role": "assistant", "content": summary})
+
         else:
-            st.session_state.chat.append({"role": "assistant", "content": reply.content})
+            st.session_state.chat.append({"role": "assistant", "content": msg.content})
 
         st.rerun()
 

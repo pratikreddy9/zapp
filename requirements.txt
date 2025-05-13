@@ -3,3 +3,5 @@ requests
 pymongo
 openai
 langchain
+langchain-openai      # 🆕 provider wrapper
+langchain-community   # 🆕 misc loaders/tools

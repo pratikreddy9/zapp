@@ -183,13 +183,21 @@ prompt = ChatPromptTemplate.from_messages([
 agent = create_openai_tools_agent(llm, [query_db], prompt)
 agent_executor = AgentExecutor(agent=agent, tools=[query_db], verbose=True)
 
-# ========== CLI ==========
-if __name__ == "__main__":
-    print("✔️  Resume-filtering chatbot is live.")
-    try:
-        while True:
-            user_input = input("\n🧑‍💼 You: ")
-            response = agent_executor.invoke({"input": user_input})
-            print(f"\n🤖 Agent:\n{response}")
-    except KeyboardInterrupt:
-        print("\n👋 Exiting...")
+# ========== STREAMLIT UI ==========
+import streamlit as st
+
+st.title("🧠 Resume Filtering Chatbot")
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+user_input = st.chat_input("Ask me to find resumes...")
+if user_input:
+    with st.spinner("Thinking..."):
+        result = agent_executor.invoke({"input": user_input})
+        st.session_state.chat_history.append((user_input, result["output"]))
+
+for user, bot in st.session_state.chat_history:
+    st.chat_message("user").write(user)
+    st.chat_message("assistant").write(bot)
+

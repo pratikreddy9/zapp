@@ -1,12 +1,14 @@
 import json
-import requests
 import streamlit as st
-from pymongo import MongoClient
 from datetime import datetime
+from pymongo import MongoClient
+from openai import OpenAI
 
-st.set_page_config(page_title="Resume Chat Agent", layout="wide")
+# ========== INIT ==========
+st.set_page_config(page_title="Resume Search Chat", layout="wide")
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# ✅ MongoDB Setup
+# ========== MONGO SETUP ==========
 def get_mongo_client():
     return MongoClient(
         host="notify.pesuacademy.com",
@@ -16,15 +18,10 @@ def get_mongo_client():
         authSource="admin"
     )
 
-# ✅ OpenAI Setup
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-OPENAI_MODEL = "gpt-4o"
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-
-# ✅ Resume Search Logic (Your OG logic)
-def search_resumes_via_mongo(filters):
-    mongo_client = get_mongo_client()
-    resumes_collection = mongo_client["resumes_database"]["resumes"]
+# ========== FUNCTION TOOL ==========
+def search_resumes(filters):
+    mongo = get_mongo_client()
+    coll = mongo["resumes_database"]["resumes"]
 
     country = filters.get("country")
     min_exp = filters.get("min_experience_years", 0)
@@ -48,11 +45,7 @@ def search_resumes_via_mongo(filters):
         job_exp_filters.append({
             "$expr": {
                 "$gte": [
-                    {
-                        "$toInt": {
-                            "$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]
-                        }
-                    },
+                    {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
                     min_exp
                 ]
             }
@@ -61,34 +54,28 @@ def search_resumes_via_mongo(filters):
     if job_exp_filters:
         query["$and"] = job_exp_filters
 
-    results = list(resumes_collection.find(query, {"_id": 0, "embedding": 0}).limit(top_k))
-    mongo_client.close()
+    results = list(coll.find(query, {"_id": 0, "embedding": 0}).limit(top_k))
+    mongo.close()
     return results
 
-# ✅ Chat memory
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ========== CHAT UI ==========
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
-# ✅ Render chat history
-for msg in st.session_state.messages:
-    box = "#ffe0e0" if msg["role"] == "user" else "#e0ffe0"
-    st.markdown(f"<div style='background-color:{box};padding:10px;border-radius:10px;margin:5px 0'>{msg['content']}</div>", unsafe_allow_html=True)
+for msg in st.session_state.chat:
+    box = "#fff3f3" if msg["role"] == "user" else "#f3fff3"
+    st.markdown(f"<div style='background-color:{box};padding:10px;border-radius:8px;margin:5px 0'>{msg['content']}</div>", unsafe_allow_html=True)
 
-# ✅ User input
-user_input = st.text_input("You:", key="input")
+user_input = st.text_input("You:", key="chat_input")
+
 if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.chat.append({"role": "user", "content": user_input})
 
-    # Build full message history
-    history = [{"role": "system", "content": "You are a resume assistant that can call a function to search MongoDB when enough info is present."}]
-    history += [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-
-    # Function schema
-    tools = [{
+    tool_def = [{
         "type": "function",
         "function": {
             "name": "search_resumes",
-            "description": "Search resumes based on structured filters",
+            "description": "Search resumes from the MongoDB using given filters.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -104,32 +91,33 @@ if user_input:
         }
     }]
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    messages = [{"role": "system", "content": "You're a resume filtering agent. Use the function only if all required parameters are present."}]
+    for m in st.session_state.chat:
+        messages.append({"role": m["role"], "content": m["content"]})
 
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": history,
-        "tools": tools,
-        "tool_choice": "auto",
-        "response_format": "json"
-    }
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            tools=tool_def,
+            tool_choice="auto",
+            response_format="json"
+        )
 
-    response = requests.post(OPENAI_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    data = response.json()
-    msg_obj = data["choices"][0]["message"]
+        msg_obj = response.choices[0].message
 
-    # If GPT wants to call search
-    if "tool_calls" in msg_obj:
-        tool_call = msg_obj["tool_calls"][0]
-        args = json.loads(tool_call["function"]["arguments"])
-        results = search_resumes_via_mongo(args)
-        reply = f"✅ Found {len(results)} matching resumes.\n\nExamples:\n" + "\n".join([r["name"] for r in results[:5]])
-    else:
-        reply = msg_obj["content"]
+        if msg_obj.tool_calls:
+            tool_call = msg_obj.tool_calls[0]
+            args = json.loads(tool_call.function.arguments)
+            results = search_resumes(args)
+            names = [r.get("name", "Unnamed") for r in results[:5]]
+            reply = f"✅ Found {len(results)} resumes. Sample:\n- " + "\n- ".join(names)
+        else:
+            reply = msg_obj.content
 
-    st.session_state.messages.append({"role": "assistant", "content": reply})
-    st.rerun()
+        st.session_state.chat.append({"role": "assistant", "content": reply})
+        st.rerun()
+
+    except Exception as e:
+        st.session_state.chat.append({"role": "assistant", "content": f"❌ Error: {str(e)}"})
+        st.rerun()

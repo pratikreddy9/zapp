@@ -5,7 +5,7 @@ from pymongo import MongoClient
 from openai import OpenAI
 
 # ========== INIT ==========
-st.set_page_config(page_title="Resume Search Chat", layout="wide")
+st.set_page_config(page_title="Resume Chat", layout="wide")
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ========== MONGO SETUP ==========
@@ -18,7 +18,7 @@ def get_mongo_client():
         authSource="admin"
     )
 
-# ========== FUNCTION TOOL ==========
+# ========== RESUME FILTER FUNCTION ==========
 def search_resumes(filters):
     mongo = get_mongo_client()
     coll = mongo["resumes_database"]["resumes"]
@@ -58,18 +58,44 @@ def search_resumes(filters):
     mongo.close()
     return results
 
-# ========== CHAT UI ==========
+# ========== UI STATE INIT ==========
 if "chat" not in st.session_state:
     st.session_state.chat = []
+if "pending_input" not in st.session_state:
+    st.session_state.pending_input = None
 
+# ========== SHOW CHAT ==========
 for msg in st.session_state.chat:
-    box = "#fff3f3" if msg["role"] == "user" else "#f3fff3"
-    st.markdown(f"<div style='background-color:{box};padding:10px;border-radius:8px;margin:5px 0'>{msg['content']}</div>", unsafe_allow_html=True)
+    role = msg["role"]
+    if role == "user":
+        st.markdown(f"<div style='background:#fce2e2;padding:10px;border-radius:8px;margin:5px 0;text-align:right'>{msg['content']}</div>", unsafe_allow_html=True)
+    elif role == "assistant" and isinstance(msg["content"], str):
+        st.markdown(f"<div style='background:#e2fce2;padding:10px;border-radius:8px;margin:5px 0;text-align:left'>{msg['content']}</div>", unsafe_allow_html=True)
+    elif role == "assistant" and isinstance(msg["content"], list):
+        for res in msg["content"]:
+            with st.container():
+                st.markdown(f"""
+                    <div style='border:1px solid #ccc;padding:10px;border-radius:8px;margin-bottom:10px'>
+                    <b>{res.get("name", "Unnamed")}</b><br>
+                    📧 {res.get("email", "N/A")}<br>
+                    📍 {res.get("country", "N/A")}<br>
+                    🛠 Skills: {", ".join(k.get("skillName", "") for k in res.get("skills", []))}<br>
+                    🔑 Keywords: {", ".join(res.get("keywords", []))}
+                    </div>
+                """, unsafe_allow_html=True)
 
+# ========== INPUT BOX ==========
 user_input = st.text_input("You:", key="chat_input")
 
 if user_input:
     st.session_state.chat.append({"role": "user", "content": user_input})
+    st.session_state.pending_input = user_input
+    st.experimental_rerun()
+
+# ========== GPT CALL ==========
+if st.session_state.pending_input:
+    user_input = st.session_state.pending_input
+    st.session_state.pending_input = None
 
     tool_def = [{
         "type": "function",
@@ -91,9 +117,9 @@ if user_input:
         }
     }]
 
-    messages = [{"role": "system", "content": "You're a resume filtering agent. Use the function only if all required parameters are present."}]
-    for m in st.session_state.chat:
-        messages.append({"role": m["role"], "content": m["content"]})
+    messages = [
+        {"role": "system", "content": "You're a resume filtering agent. If enough info is present, call the function. Always output valid JSON."}
+    ] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.chat if m["role"] in ("user", "assistant")]
 
     try:
         response = client.chat.completions.create(
@@ -104,20 +130,22 @@ if user_input:
             response_format={"type": "json_object"}
         )
 
-        msg_obj = response.choices[0].message
+        msg = response.choices[0].message
 
-        if msg_obj.tool_calls:
-            tool_call = msg_obj.tool_calls[0]
-            args = json.loads(tool_call.function.arguments)
+        if msg.tool_calls:
+            args = json.loads(msg.tool_calls[0].function.arguments)
             results = search_resumes(args)
-            names = [r.get("name", "Unnamed") for r in results[:5]]
-            reply = f"✅ Found {len(results)} resumes. Sample:\n- " + "\n- ".join(names)
-        else:
-            reply = msg_obj.content
 
-        st.session_state.chat.append({"role": "assistant", "content": reply})
-        st.rerun()
+            if not results:
+                st.session_state.chat.append({"role": "assistant", "content": "No matching resumes found."})
+            else:
+                st.session_state.chat.append({"role": "assistant", "content": results})
+
+        elif msg.content:
+            st.session_state.chat.append({"role": "assistant", "content": msg.content})
+
+        st.experimental_rerun()
 
     except Exception as e:
         st.session_state.chat.append({"role": "assistant", "content": f"❌ Error: {str(e)}"})
-        st.rerun()
+        st.experimental_rerun()

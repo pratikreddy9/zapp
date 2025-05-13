@@ -101,7 +101,7 @@ if user_input:
             messages=messages,
             tools=tool_def,
             tool_choice="auto",
-            response_format="json"
+            response_format={"type": "json_object"}
         )
 
         msg_obj = response.choices[0].message

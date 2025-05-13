@@ -1,169 +1,136 @@
 import json, streamlit as st
 from pymongo import MongoClient
 from openai import OpenAI
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationSummaryBufferMemory
+from langchain.agents import initialize_agent, AgentType, Tool
 
-# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Next‑Gen Resume Chatbot", layout="wide")
-oa = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# ── STREAMLIT CONFIG ──────────────────────────────────────────────────────────
+st.set_page_config(page_title="LangChain Resume Chatbot", layout="wide")
+st.title("🤖 LangChain Resume Assistant")
 
-# ── SYSTEM PROMPTS ────────────────────────────────────────────────────────────
-MANAGER_SYS = """
-You are the Manager agent. Keep a friendly, analytical tone.
-If you need data, output ONLY this JSON:
+# ── OPENAI + LANGCHAIN LLM ────────────────────────────────────────────────────
+llm = ChatOpenAI(
+    model="gpt-4o",
+    api_key=st.secrets["OPENAI_API_KEY"],
+    temperature=0
+)
 
-{ "action":"query_db", "filters":{ country,min_experience_years,max_experience_years,
-  job_titles,skills,top_k } }
-
-No extra keys or comments.
-If data (rows) is provided, analyse and answer naturally.
-The word JSON appears here so OpenAI accepts json_object.
-"""
-RESPONDER_SYS = "You are the Manager agent. Analyse the given rows and answer clearly."
-
-# ── TOOLS SCHEMA (visible to Manager) ─────────────────────────────────────────
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "query_db",
-        "description": "Search resumes via structured filters.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "country": {"type": "string"},
-                "min_experience_years": {"type": "integer"},
-                "max_experience_years": {"type": "integer"},
-                "job_titles": {"type": "array", "items": {"type": "string"}},
-                "skills": {"type": "array", "items": {"type": "string"}},
-                "top_k": {"type": "integer"}
-            },
-            "required": ["country", "skills", "job_titles"]
-        }
-    }
-}]
-
-# ── MONGO FUNCTION (Sous‑Chef) ────────────────────────────────────────────────
-def query_db(filters: dict) -> list:
-    coll = MongoClient(
+# ── MONGO SEARCH FUNCTION (your original logic) ───────────────────────────────
+def mongo_search(filters: dict) -> list:
+    db = MongoClient(
         host="notify.pesuacademy.com", port=27017,
         username="admin", password=st.secrets["MONGO_PASS"],
         authSource="admin"
     )["resumes_database"]["resumes"]
 
-    q = {}
-    c = filters.get("country", "").strip().lower()
-    if c:
-        q["country"] = {"$regex": f"^{c}$", "$options": "i"}
-    skills = filters.get("skills", [])
-    if skills:
-        q["$or"] = [{"skills.skillName": {"$in": skills}}, {"keywords": {"$in": skills}}]
-
-    f = []
-    titles = filters.get("job_titles", [])
-    if titles:
-        f.append({"jobExperiences.title": {"$in": titles}})
+    country = filters.get("country", "").strip().lower()
     min_exp = int(filters.get("min_experience_years", 0))
-    if min_exp:
-        f.append({"$expr": {"$gte": [
-            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
-            min_exp]}})
-    if f:
-        q["$and"] = f
+    titles  = filters.get("job_titles", [])
+    skills  = filters.get("skills", [])
+    top_k   = int(filters.get("top_k", 50))
 
-    top_k = int(filters.get("top_k", 50))
-    rows = list(coll.find(q, {"_id": 0, "embedding": 0}).limit(top_k))
-    coll.database.client.close()
+    q = {}
+    if country:
+        q["country"] = {"$regex": f"^{country}$", "$options": "i"}
+    if skills:
+        q["$or"] = [{"skills.skillName": {"$in": skills}},
+                    {"keywords": {"$in": skills}}]
+
+    filters_and = []
+    if titles:
+        filters_and.append({"jobExperiences.title": {"$in": titles}})
+    if min_exp:
+        filters_and.append({
+            "$expr": {"$gte": [
+                {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
+                min_exp]}})
+    if filters_and:
+        q["$and"] = filters_and
+
+    rows = list(db.find(q, {"_id": 0, "embedding": 0}).limit(top_k))
+    db.client.close()
     return rows
 
-# ── MEMORY HELPERS ────────────────────────────────────────────────────────────
-def summarise(rows, max_show=5):
-    return ", ".join(r["name"] for r in rows[:max_show]) if rows else "0 rows"
+# ── LANGCHAIN TOOL (Sous‑Chef) ────────────────────────────────────────────────
+def _tool_func(json_str: str) -> str:
+    """LangChain Tool wrapper. Input MUST be JSON string of filters."""
+    try:
+        filters = json.loads(json_str)
+    except Exception as e:
+        return f"ERROR:: bad JSON ({e})"
+    rows = mongo_search(filters)
+    # Save rows in session for UI
+    st.session_state.last_rows = rows
+    st.session_state.last_country = filters.get("country", "unknown")
+    return f"RESULT::{len(rows)}"
 
-def add_summary(country, rows):
-    st.session_state.memory.append({
-        "country": country.lower(),
-        "count": len(rows),
-        "summary": summarise(rows)
-    })
+query_tool = Tool(
+    name="query_db",
+    func=_tool_func,
+    description=(
+        "Search resumes. "
+        "Input MUST be a JSON string with keys: country, min_experience_years, "
+        "max_experience_years, job_titles, skills, top_k"
+    )
+)
 
-def memory_context(max_items=3):
-    ctx = []
-    for m in st.session_state.memory[-max_items:]:
-        ctx.append(f"{m['country'].title()}: {m['count']} matches (e.g. {m['summary']})")
-    return "\n".join(ctx)
+# ── MEMORY & AGENT INITIALISATION ─────────────────────────────────────────────
+if "memory" not in st.session_state:
+    st.session_state.memory = ConversationSummaryBufferMemory(
+        llm=llm,
+        max_token_limit=1500,
+        memory_key="chat_history"
+    )
 
-# ── SESSION STATE INIT ────────────────────────────────────────────────────────
-if "chat"   not in st.session_state: st.session_state.chat = []   # conversation turns
-if "memory" not in st.session_state: st.session_state.memory = [] # past search summaries
-if "busy"   not in st.session_state: st.session_state.busy = False
+agent = initialize_agent(
+    tools=[query_tool],
+    llm=llm,
+    agent=AgentType.OPENAI_MULTI_FUNCTIONS,
+    memory=st.session_state.memory,
+    verbose=False,
+    agent_kwargs={
+        "system_message":(
+            "You are the Manager agent. Converse naturally. "
+            "When enough info, call the tool 'query_db' by passing exactly a JSON string "
+            "of filters. Otherwise ask clarifying questions. "
+            "After receiving RESULT::N from tool, interpret saved rows in Streamlit "
+            "(the frontend will display them) and explain to the user."
+        )
+    }
+)
 
-# ── RENDER ALL CHAT TURNS ─────────────────────────────────────────────────────
-st.title("🤖  Two‑Agent Resume Assistant")
-for t in st.session_state.chat:
-    st.chat_message(t["role"]).markdown(t["content"])
+# ── STREAMLIT STATE FOR CHAT & RESULTS ────────────────────────────────────────
+if "chat_log" not in st.session_state: st.session_state.chat_log = []
+if "last_rows" not in st.session_state: st.session_state.last_rows = []
+if "last_country" not in st.session_state: st.session_state.last_country = ""
 
-# ── USER INPUT ────────────────────────────────────────────────────────────────
-prompt = st.chat_input("Ask your question…")
-if prompt and not st.session_state.busy:
-    st.session_state.busy = True
-    st.session_state.chat.append({"role": "user", "content": prompt})
-    st.chat_message("user").markdown(prompt)
+# ── RENDER CHAT LOG ───────────────────────────────────────────────────────────
+for turn in st.session_state.chat_log:
+    st.chat_message(turn["role"]).markdown(turn["content"])
 
-    # Build context for Manager
-    ctx = [{"role": "system", "content": MANAGER_SYS}]
-    mem = memory_context()
-    if mem:
-        ctx.append({"role": "assistant", "content": "Previous summaries:\n" + mem})
-    ctx += [{"role": m["role"], "content": m["content"]}
-            for m in st.session_state.chat[-6:]]
+# ── RENDER LAST RESULT CARDS (persist) ────────────────────────────────────────
+if st.session_state.last_rows:
+    st.markdown(f"### 📦 {len(st.session_state.last_rows)} matches for "
+                f"{st.session_state.last_country.title()}")
+    for r in st.session_state.last_rows:
+        with st.container(border=True):
+            st.markdown(f"**{r['name']}** — {r.get('country','N/A')}")
+            st.markdown(
+                f"📧 {r.get('email','N/A')} &nbsp;&nbsp; "
+                f"🛠 {', '.join(s.get('skillName','') for s in r.get('skills',[]))}",
+                unsafe_allow_html=True
+            )
 
-    # ── Manager CALL ─────────────────────────────────────────────────────────
-    mgr = oa.chat.completions.create(
-        model="gpt-4o",
-        messages=ctx,
-        tools=TOOLS,
-        tool_choice="auto",
-        response_format={"type": "json_object"}
-    ).choices[0].message
+# ── USER INPUT & AGENT RUN ───────────────────────────────────────────────────
+user_msg = st.chat_input("Ask something about candidates…")
+if user_msg:
+    st.chat_message("user").markdown(user_msg)
+    st.session_state.chat_log.append({"role": "user", "content": user_msg})
 
-    # If Manager just chats
-    if not mgr.tool_calls:
-        st.chat_message("assistant").markdown(mgr.content)
-        st.session_state.chat.append({"role": "assistant", "content": mgr.content})
-        st.session_state.busy = False
-        st.stop()
+    # LangChain agent handles tool invocation
+    agent_reply = agent.run(user_msg)
 
-    # ── Manager issued query_db JSON ─────────────────────────────────────────
-    filters = json.loads(mgr.tool_calls[0].function.arguments)
-    rows = query_db(filters)
-    add_summary(filters.get("country", "unknown"), rows)
-
-    # call Manager again as responder with rows
-    responder_msgs = [
-        {"role": "system", "content": RESPONDER_SYS},
-        {"role": "user", "content": json.dumps({
-            "question": prompt,
-            "rows": rows[:20]             # truncate for token cost
-        })}
-    ]
-    resp = oa.chat.completions.create(
-        model="gpt-4o",
-        messages=responder_msgs
-    ).choices[0].message.content
-
-    # show answer
-    st.chat_message("assistant").markdown(resp)
-    st.session_state.chat.append({"role": "assistant", "content": resp})
-
-    # show cards
-    if rows:
-        st.markdown(f"### 📦 {len(rows)} matches for {filters.get('country','?').title()}")
-        for r in rows:
-            with st.container(border=True):
-                st.markdown(f"**{r['name']}** — {r.get('country','N/A')}")
-                st.markdown(
-                    f"📧 {r.get('email','N/A')} &nbsp;&nbsp; "
-                    f"🛠 {', '.join(s.get('skillName','') for s in r.get('skills',[]))}",
-                    unsafe_allow_html=True
-                )
-
-    st.session_state.busy = False
+    # If tool returned RESULT::, agent_reply will still be a string
+    st.chat_message("assistant").markdown(agent_reply)
+    st.session_state.chat_log.append({"role": "assistant", "content": agent_reply})

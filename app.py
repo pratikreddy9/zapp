@@ -1,10 +1,9 @@
 """
-Resume‑filtering chatbot with memory
+Resume‑filtering chatbot with conversation memory
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
-import os
-import json
+import os, json
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -17,6 +16,7 @@ from langchain_core.tools import tool
 from langchain.agents import create_openai_tools_agent, AgentExecutor
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferMemory
+import openai
 
 # ── CONFIG ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -89,9 +89,7 @@ def expand(values: List[str], table: Dict[str, List[str]]) -> List[str]:
     return list(out)
 
 # ── LLM‑BASED RESUME SCORER ────────────────────────────────────────────
-import openai
 _openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-
 EVALUATOR_PROMPT = """
 You are a resume scoring assistant. Return only the 10 best resumeIds.
 
@@ -101,7 +99,6 @@ JSON format:
   "completed_at": "ISO"
 }
 """
-
 def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     chat = _openai_client.chat.completions.create(
         model=EVAL_MODEL_NAME,
@@ -131,33 +128,23 @@ def query_db(
     """Filter MongoDB resumes and return top 10 matches."""
     try:
         mongo_q: Dict[str, Any] = {}
-
         if country:
-            variants = COUNTRY_EQUIV.get(country.strip().lower(), [country])
-            mongo_q["country"] = {"$in": variants}
-
+            mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
         if skills:
-            expanded_skills = expand(skills, SKILL_VARIANTS)
+            expanded = expand(skills, SKILL_VARIANTS)
             mongo_q["$or"] = [
-                {"skills.skillName": {"$in": expanded_skills}},
-                {"keywords": {"$in": expanded_skills}},
+                {"skills.skillName": {"$in": expanded}},
+                {"keywords": {"$in": expanded}},
             ]
-
         and_clauses = []
         if job_titles:
-            expanded_titles = expand(job_titles, TITLE_VARIANTS)
-            and_clauses.append({"jobExperiences.title": {"$in": expanded_titles}})
-
+            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
         if isinstance(min_experience_years, int) and min_experience_years > 0:
             and_clauses.append(
                 {
                     "$expr": {
                         "$gte": [
-                            {
-                                "$toInt": {
-                                    "$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]
-                                }
-                            },
+                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
                             min_experience_years,
                         ]
                     }
@@ -165,23 +152,17 @@ def query_db(
             )
         if and_clauses:
             mongo_q["$and"] = and_clauses
-
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
-            candidates = list(
-                coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k)
-            )
-
+            candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
         best_ids = score_resumes(query, candidates)
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
-
         return {
             "message": f"{len(best_resumes)} resumes after scoring.",
             "results_count": len(best_resumes),
             "results": best_resumes,
             "completed_at": datetime.utcnow().isoformat(),
         }
-
     except PyMongoError as err:
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
@@ -189,7 +170,6 @@ def query_db(
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
-
 prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -197,26 +177,19 @@ prompt = ChatPromptTemplate.from_messages(
             "You are a helpful HR assistant. Use the `query_db` tool whenever the "
             "user asks for candidates or filtering. Otherwise, answer normally.",
         ),
-        MessagesPlaceholder(variable_name="chat_history"),       # <-- memory
+        MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),    # <-- tool log
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
     ]
 )
-
-# We keep one ConversationBufferMemory per Streamlit session
 if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
+        memory_key="chat_history", return_messages=True
     )
-
 if "agent_executor" not in st.session_state:
     agent = create_openai_tools_agent(llm, [query_db], prompt)
     st.session_state.agent_executor = AgentExecutor(
-        agent=agent,
-        tools=[query_db],
-        memory=st.session_state.memory,
-        verbose=True,
+        agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
@@ -225,12 +198,8 @@ st.title("🧠 Resume Filtering Chatbot")
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
     with st.spinner("Thinking..."):
-        result = st.session_state.agent_executor.invoke({"input": user_input})
-        # tiny guard: executor returns {'output': '...'} when llm answers
-        bot_reply = result.get("output", result)
-        st.session_state.memory.save_context({"input": user_input}, {"output": bot_reply})
+        st.session_state.agent_executor.invoke({"input": user_input})  # memory handled internally
 
-# render chat history (newest last)
 for msg in st.session_state.memory.chat_memory.messages:
     if msg.type == "human":
         st.chat_message("user").write(msg.content)

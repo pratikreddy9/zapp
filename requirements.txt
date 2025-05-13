@@ -1,8 +1,7 @@
 streamlit
-requests
 pymongo
-openai
-langchain
-langchain-openai      # 🆕 provider wrapper
-langchain-community   # 🆕 misc loaders/tools
-langchain-openai>=0.0.5
+openai>=1.3
+langchain>=0.4.0           # core framework
+langchain-openai>=0.1.0    # OpenAI provider
+langchain-community>=0.1.0 # generic tool + loader set
+pydantic>=2.6               # for the tool schema

@@ -5,3 +5,4 @@ openai
 langchain
 langchain-openai      # 🆕 provider wrapper
 langchain-community   # 🆕 misc loaders/tools
+langchain-openai>=0.0.5

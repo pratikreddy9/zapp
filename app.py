@@ -1,7 +1,10 @@
 import json, streamlit as st
 from pymongo import MongoClient
 from openai import OpenAI
-from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationSummaryBufferMemory
+from langchain.agents import initialize_agent, AgentType, Tool
+from langchain_openai import ChatOpenAI
+
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.agents import initialize_agent, AgentType, Tool
 

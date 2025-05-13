@@ -18,6 +18,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain.agents import create_openai_tools_agent, AgentExecutor
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+import streamlit as st
 
 # ── CONFIG ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]      # ← pull from secrets
@@ -184,7 +185,7 @@ agent = create_openai_tools_agent(llm, [query_db], prompt)
 agent_executor = AgentExecutor(agent=agent, tools=[query_db], verbose=True)
 
 # ========== STREAMLIT UI ==========
-import streamlit as st
+
 
 st.title("🧠 Resume Filtering Chatbot")
 

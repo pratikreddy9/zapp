@@ -19,13 +19,13 @@ from langchain_core.tools import tool
 from langchain.agents import create_openai_tools_agent, AgentExecutor
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-# ========== CONFIG ==========
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# ── CONFIG ─────────────────────────────────────────────────────────────
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]      # ← pull from secrets
 MONGO_CFG = {
     "host": "notify.pesuacademy.com",
     "port": 27017,
     "username": "admin",
-    "password": "",
+    "password": st.secrets["MONGO_PASS"],          # ← pull password
     "authSource": "admin",
 }
 MODEL_NAME = "gpt-4o"

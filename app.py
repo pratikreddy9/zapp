@@ -114,7 +114,7 @@ if user_input:
         "messages": history,
         "tools": tools,
         "tool_choice": "auto",
-        "response_format": {"type": "json_object"}
+        "response_format": "json"
     }
 
     response = requests.post(OPENAI_URL, headers=headers, json=payload)

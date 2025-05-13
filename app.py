@@ -90,7 +90,7 @@ user_input = st.text_input("You:", key="chat_input")
 if user_input:
     st.session_state.chat.append({"role": "user", "content": user_input})
     st.session_state.pending_input = user_input
-    st.experimental_rerun()
+    st.rerun()
 
 # ========== GPT CALL ==========
 if st.session_state.pending_input:
@@ -144,8 +144,8 @@ if st.session_state.pending_input:
         elif msg.content:
             st.session_state.chat.append({"role": "assistant", "content": msg.content})
 
-        st.experimental_rerun()
+        st.rerun()
 
     except Exception as e:
         st.session_state.chat.append({"role": "assistant", "content": f"❌ Error: {str(e)}"})
-        st.experimental_rerun()
+        st.rerun()

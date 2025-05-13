@@ -2,22 +2,22 @@ import json, streamlit as st
 from pymongo import MongoClient
 from openai import OpenAI
 
-# ── STREAMLIT CONFIG ──────────────────────────────────────────────────────────
+# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Resume Chatbot", layout="wide")
 openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# ── SYSTEM PROMPT (condensed but complete) ────────────────────────────────────
+# ── SYSTEM PROMPT (condensed) ─────────────────────────────────────────────────
 MASTER_PROMPT = """
-You are a conversational resume‑search assistant.  
-• If more info is needed, ask clarifying questions.  
-• Otherwise call the tool `search_resumes` with:
-  {country,min_experience_years,max_experience_years,job_titles,skills,top_k}.  
-Rules: country case‑insensitive; skills must match BOTH skills.skillName & keywords.  
-Expand variants (SQL→mysql, JS→javascript, Software Developer→software engineer…).  
-Respond in valid JSON when calling the tool; otherwise speak naturally.
+You are a conversational resume‑search assistant.
+• If info is missing, ask follow‑ups.
+• Else call the tool `search_resumes` with JSON args:
+  {country,min_experience_years,max_experience_years,job_titles,skills,top_k}.
+Rules: country case‑insensitive; skills must match BOTH skills.skillName & keywords.
+Expand common variants (SQL→mysql, JS→javascript, Software Developer→software engineer).
+Always output valid JSON when calling the tool; otherwise reply naturally.
 """
 
-# ── MONGO SEARCH TOOL ─────────────────────────────────────────────────────────
+# ── MONGO TOOL ────────────────────────────────────────────────────────────────
 def get_mongo():
     return MongoClient(
         host="notify.pesuacademy.com",
@@ -29,72 +29,89 @@ def get_mongo():
 
 def search_resumes(params: dict) -> list:
     db = get_mongo()["resumes_database"]["resumes"]
-    top_k = int(params.get("top_k", 50))
-    country = params.get("country","").strip().lower()
+    country = params.get("country", "").strip().lower()
     min_exp = int(params.get("min_experience_years", 0))
-    skills  = params.get("skills",[])
-    titles  = params.get("job_titles",[])
+    titles  = params.get("job_titles", [])
+    skills  = params.get("skills", [])
+    top_k   = int(params.get("top_k", 50))
 
-    query = {}
+    q = {}
     if country:
-        query["country"] = {"$regex": f"^{country}$", "$options": "i"}
+        q["country"] = {"$regex": f"^{country}$", "$options": "i"}
     if skills:
-        query["$or"] = [{"skills.skillName":{"$in":skills}}, {"keywords":{"$in":skills}}]
+        q["$or"] = [{"skills.skillName":{"$in":skills}}, {"keywords":{"$in":skills}}]
 
-    f=[]
+    f = []
     if titles:
         f.append({"jobExperiences.title":{"$in":titles}})
     if min_exp:
         f.append({"$expr":{"$gte":[
             {"$toInt":{"$ifNull":[{"$first":"$jobExperiences.duration"},"0"]}},
             min_exp]}})
-    if f: query["$and"]=f
+    if f: q["$and"] = f
 
-    rows=list(db.find(query,{"_id":0,"embedding":0}).limit(top_k))
+    rows = list(db.find(q, {"_id":0,"embedding":0}).limit(top_k))
     get_mongo().close()
     return rows
 
-# ── SESSION STATE INIT ────────────────────────────────────────────────────────
-if "chat"     not in st.session_state: st.session_state.chat=[]
-if "searches" not in st.session_state: st.session_state.searches=[]  # list(dict)
+# ── SESSION STATE ─────────────────────────────────────────────────────────────
+if "chat"     not in st.session_state: st.session_state.chat = []          # all turns
+if "searches" not in st.session_state: st.session_state.searches = []      # [{country,rows}]
+if "busy"     not in st.session_state: st.session_state.busy = False
 
-if "busy" not in st.session_state:     st.session_state.busy=False
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+def save_search(country: str, rows: list):
+    st.session_state.searches.append({"country": country.lower(), "rows": rows})
 
-# ── RENDER ENTIRE CHAT HISTORY ────────────────────────────────────────────────
-for turn in st.session_state.chat:
-    st.chat_message(turn["role"]).markdown(turn["content"])
+def context_summaries(max_items=3) -> str:
+    summaries = []
+    for item in st.session_state.searches[-max_items:]:
+        names = ", ".join(r["name"] for r in item["rows"][:5])
+        summaries.append(f"{item['country'].title()}: {len(item['rows'])} matches (e.g. {names})")
+    return "\n".join(summaries)
 
-# ── RENDER ALL SAVED SEARCH RESULT CARDS ──────────────────────────────────────
-for idx,search in enumerate(st.session_state.searches,1):
-    st.markdown(f"### 🔎 Result #{idx}: {search['summary']}")
-    for r in search["rows"]:
+def render_cards(rows: list):
+    for r in rows:
         with st.container(border=True):
             st.markdown(f"**{r.get('name','Unnamed')}** — {r.get('country','N/A')}")
             st.markdown(
-                f"📧 {r.get('email','N/A')}   📱 {r.get('contactNo','N/A')}<br>"
-                f"🛠 {', '.join(s.get('skillName','') for s in r.get('skills',[]))}",
+                f"📧 {r.get('email','N/A')} &nbsp;&nbsp; "
+                f"📱 {r.get('contactNo','N/A')}<br>"
+                f"🛠 {', '.join(s.get('skillName','') for s in r.get('skills',[]))}",
                 unsafe_allow_html=True
             )
 
+# ── RENDER CHAT HISTORY ──────────────────────────────────────────────────────
+st.title("🤖 Resume‑Search Assistant")
+for turn in st.session_state.chat:
+    st.chat_message(turn["role"]).markdown(turn["content"])
+
+# ── RENDER ALL SEARCHES (persist) ────────────────────────────────────────────
+if st.session_state.searches:
+    st.markdown("### 📦 Searches so far")
+    for idx, item in enumerate(st.session_state.searches, 1):
+        st.markdown(f"**Result #{idx} – {item['country'].title()} ({len(item['rows'])} matches)**")
+        render_cards(item["rows"])
+
 # ── USER INPUT ───────────────────────────────────────────────────────────────
-prompt = st.chat_input("Ask the assistant…")
+prompt = st.chat_input("Ask something about candidates…")
 if prompt and not st.session_state.busy:
-    # add user turn
+    st.session_state.busy = True
     st.session_state.chat.append({"role":"user","content":prompt})
     st.chat_message("user").markdown(prompt)
-    st.session_state.busy=True
 
-    # build context: system + last 3 turns
-    context=[{"role":"system","content":MASTER_PROMPT}]
-    context += [{"role":m["role"],"content":m["content"]}
-                for m in st.session_state.chat[-6:]]  # last 3 user+assistant pairs
+    # Build GPT context: system + memory summaries + last 6 turns
+    messages = [{"role":"system","content":MASTER_PROMPT}]
+    mem = context_summaries()
+    if mem:
+        messages.append({"role":"assistant","content":"Memory:\n"+mem})
+    messages += [{"role":m["role"],"content":m["content"]} for m in st.session_state.chat[-6:]]
 
-    # tool schema
-    tools=[{
+    tool_schema = [{
         "type":"function",
         "function":{
             "name":"search_resumes",
-            "description":"Search resumes using structured filters.",
+            "description":"Search resumes with filters",
             "parameters":{
                 "type":"object",
                 "properties":{
@@ -113,39 +130,26 @@ if prompt and not st.session_state.busy:
     # ── GPT CALL ────────────────────────────────────────────────────────────
     rsp = openai_client.chat.completions.create(
         model="gpt-4o",
-        messages=context,
-        tools=tools,
+        messages=messages,
+        tools=tool_schema,
         tool_choice="auto",
         response_format={"type":"json_object"}
     ).choices[0].message
 
-    # assistant natural reply
+    # Assistant reply text
     if rsp.content:
         st.chat_message("assistant").markdown(rsp.content)
         st.session_state.chat.append({"role":"assistant","content":rsp.content})
 
-    # tool execution
+    # If GPT called the tool
     if rsp.tool_calls:
-        args=json.loads(rsp.tool_calls[0].function.arguments)
-        rows=search_resumes(args)
-        summary=f"{len(rows)} resumes for {args.get('country','?')}"
+        args = json.loads(rsp.tool_calls[0].function.arguments)
+        rows = search_resumes(args)
+        save_search(args.get("country","unknown"), rows)
 
-        # save search
-        st.session_state.searches.append({"summary":summary,"rows":rows})
-
-        # brief assistant confirmation
-        confirm=f"Here are the top {len(rows)} matches."
+        confirm = f"Here are the top {len(rows)} matches for {args.get('country','?').title()}."
         st.chat_message("assistant").markdown(confirm)
         st.session_state.chat.append({"role":"assistant","content":confirm})
+        render_cards(rows)
 
-        # immediately render cards for new search
-        for r in rows:
-            with st.container(border=True):
-                st.markdown(f"**{r.get('name','Unnamed')}** — {r.get('country','N/A')}")
-                st.markdown(
-                    f"📧 {r.get('email','N/A')}   📱 {r.get('contactNo','N/A')}<br>"
-                    f"🛠 {', '.join(s.get('skillName','') for s in r.get('skills',[]))}",
-                    unsafe_allow_html=True
-                )
-
-    st.session_state.busy=False
+    st.session_state.busy = False

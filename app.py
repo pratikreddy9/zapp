@@ -13,11 +13,13 @@ from typing import List, Optional, Dict, Any
 
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
+
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain.agents import create_openai_tools_agent, AgentExecutor
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-# ========= CONFIG =========
+# ========== CONFIG ==========
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 MONGO_CFG = {
     "host": "notify.pesuacademy.com",
@@ -26,16 +28,17 @@ MONGO_CFG = {
     "password": "",
     "authSource": "admin",
 }
-MODEL_NAME = "gpt-4o"                # or gpt-4o-mini if you like
-EVAL_MODEL_NAME = "gpt-4o"           # reuse same model for scoring
+MODEL_NAME = "gpt-4o"
+EVAL_MODEL_NAME = "gpt-4o"
 TOP_K_DEFAULT = 50
 DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 
-# ========= HELPER =========
+# ========== MONGO ==========
 def get_mongo_client() -> MongoClient:
     return MongoClient(**MONGO_CFG)
 
+# ========== NORMALIZATION ==========
 COUNTRY_EQUIV = {
     "indonesia": ["indonesia"],
     "vietnam": ["vietnam", "viet nam", "vn", "vietnamese"],
@@ -72,15 +75,15 @@ def expand(values: List[str], table: Dict[str, List[str]]) -> List[str]:
     for v in values:
         v_low = v.strip().lower()
         out.update(table.get(v_low, []))
-        out.add(v)  # keep original
+        out.add(v)
     return list(out)
 
-# ========= OPENAI SCORER (same logic you had) =========
+# ========== EVALUATOR ==========
 import openai
 _openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 EVALUATOR_PROMPT = """
-You are a resume scoring assistant. Return **only** the 10 best resumeIds.
+You are a resume scoring assistant. Return only the 10 best resumeIds.
 
 Format:
 {
@@ -101,7 +104,7 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     content = json.loads(chat.choices[0].message.content)
     return content.get("top_resume_ids", [])
 
-# ========= TOOL =========
+# ========== TOOL ==========
 @tool
 def query_db(
     query: str,
@@ -114,11 +117,11 @@ def query_db(
 ) -> Dict[str, Any]:
     """
     Filter MongoDB resumes by country, experience, job titles and skills.
-    Returns top 10 best‑matching resumes (after LLM re‑scoring).
+    Returns top 10 best-matching resumes (after LLM re-scoring).
     """
     try:
-        # -------- Build Mongo query --------
         mongo_q: Dict[str, Any] = {}
+
         if country:
             norm = country.strip().lower()
             variants = COUNTRY_EQUIV.get(norm, [norm])
@@ -135,6 +138,7 @@ def query_db(
         if job_titles:
             expanded_titles = expand(job_titles, TITLE_VARIANTS)
             and_clauses.append({"jobExperiences.title": {"$in": expanded_titles}})
+
         if isinstance(min_experience_years, int) and min_experience_years > 0:
             and_clauses.append({
                 "$expr": {
@@ -144,15 +148,14 @@ def query_db(
                     ]
                 }
             })
+
         if and_clauses:
             mongo_q["$and"] = and_clauses
 
-        # -------- Fetch candidates --------
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
             candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
 
-        # -------- Second‑stage LLM scoring --------
         best_ids = score_resumes(query, candidates)
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
 
@@ -162,30 +165,31 @@ def query_db(
             "results": best_resumes,
             "completed_at": datetime.utcnow().isoformat(),
         }
+
     except PyMongoError as db_err:
         return {"error": f"DB error: {str(db_err)}"}
     except Exception as e:
         return {"error": str(e)}
 
-# ========= AGENT =========
+# ========== AGENT SETUP ==========
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
 
-prompt = (
-    "You are a helpful HR assistant. "
-    "Use the `query_db` tool whenever the user asks for candidates or filtering. "
-    "Otherwise, answer normally."
-)
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful HR assistant. Use the `query_db` tool whenever the user asks for candidates or filtering. Otherwise, answer normally."),
+    ("user", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad")
+])
 
 agent = create_openai_tools_agent(llm, [query_db], prompt)
 agent_executor = AgentExecutor(agent=agent, tools=[query_db], verbose=True)
 
-# ========= CLI ENTRY =========
+# ========== CLI ==========
 if __name__ == "__main__":
-    print("✔️  Resume‑filter chatbot ready. Type your query (Ctrl‑C to quit).")
+    print("✔️  Resume-filtering chatbot is live.")
     try:
         while True:
             user_input = input("\n🧑‍💼 You: ")
             response = agent_executor.invoke({"input": user_input})
             print(f"\n🤖 Agent:\n{response}")
     except KeyboardInterrupt:
-        print("\nBye!")
+        print("\n👋 Exiting...")

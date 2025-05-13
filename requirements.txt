@@ -2,3 +2,4 @@ streamlit
 requests
 pymongo
 openai
+langchain>=0.1.9

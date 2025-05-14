@@ -1,9 +1,9 @@
 """
-ZappBot: Resume‑filtering chatbot with reliable agent and enhanced UI
+ZappBot: Resume‑filtering chatbot with optimized display
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
-import os, json, re
+import os, json, re, hashlib
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -177,77 +177,25 @@ def process_response(text):
     3. Remove the resume list from the text to avoid redundancy
     """
     # First, check if this is a resume-listing response
-    if "Here are some" in text and ("Experience:" in text or "experience:" in text or "Email:" in text or "Contact" in text):
+    if "Here are some" in text and ("Experience:" in text or "experience:" in text) and ("Skills:" in text or "skills:" in text):
         # Find the introductory text (everything before the first name)
         # Look for pattern of a blank line followed by a name (text with no indentation)
-        intro_pattern = r'^(.*?)\n\s*(\d+\.\s+\*\*|\n[A-Z][a-z]+)'
+        intro_pattern = r'^(.*?)\n\n([A-Z][a-z]+.*?)\n\nEmail:'
         intro_match = re.search(intro_pattern, text, re.DOTALL)
         
         intro_text = ""
         if intro_match:
             intro_text = intro_match.group(1).strip()
         
-        # Extract the resumes - try multiple patterns
-        resumes = []
+        # Extract the resumes - accommodate both formats (numbered and unnumbered)
+        # First try standard format with blank lines
+        resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
+        matches = re.findall(resume_pattern, text, re.MULTILINE | re.IGNORECASE)
         
-        # Pattern 1: Numbered list with bold names
-        pattern1 = r'\d+\.\s+\*\*([^*]+)\*\*\s*(?:\n\s*\*)?([^*]*)'
-        matches1 = re.findall(pattern1, text, re.MULTILINE)
-        
-        if matches1:
-            for match in matches1:
-                name, details = match
-                name = name.strip()
-                
-                # Extract email, contact, location, experience, skills from details
-                email_match = re.search(r'Email:\s*([^\n]*)', details)
-                contact_match = re.search(r'Contact:\s*([^\n]*)', details)
-                location_match = re.search(r'Location:\s*([^\n]*)', details)
-                experience_match = re.search(r'Experience:\s*([^\n]*)', details)
-                skills_match = re.search(r'Skills:\s*([^\n]*)', details)
-                
-                email = email_match.group(1).strip() if email_match else ""
-                contact = contact_match.group(1).strip() if contact_match else ""
-                location = location_match.group(1).strip() if location_match else ""
-                
-                # Handle experience and skills
-                experience = []
-                if experience_match:
-                    experience = [e.strip() for e in experience_match.group(1).split(',')]
-                
-                skills = []
-                if skills_match:
-                    skills = [s.strip() for s in skills_match.group(1).split(',')]
-                
-                resumes.append({
-                    "name": name,
-                    "email": email,
-                    "contactNo": contact,
-                    "location": location,
-                    "experience": experience,
-                    "skills": skills
-                })
-        
-        # Pattern 2: Standard format with blank lines
-        if not resumes:
-            pattern2 = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
-            matches2 = re.findall(pattern2, text, re.MULTILINE | re.IGNORECASE)
-            
-            for match in matches2:
-                name, email, contact, location, experience, skills = match
-                
-                # Split skills and experience
-                skill_list = [s.strip() for s in skills.split(',')]
-                exp_list = [e.strip() for e in experience.split(',')]
-                
-                resumes.append({
-                    "name": name.strip(),
-                    "email": email.strip(),
-                    "contactNo": contact.strip(),
-                    "location": location.strip(),
-                    "experience": exp_list,
-                    "skills": skill_list
-                })
+        # If that didn't work, try the numbered format
+        if not matches:
+            resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
+            matches = re.findall(resume_pattern, text, re.MULTILINE)
         
         # Extract the conclusion (after all resumes)
         # Look for lines that contain phrases like "These candidates" or similar conclusion statements
@@ -257,6 +205,24 @@ def process_response(text):
         conclusion_text = ""
         if conclusion_match:
             conclusion_text = conclusion_match.group(1).strip()
+        
+        # Convert resume matches to structured data
+        resumes = []
+        for match in matches:
+            name, email, contact, location, experience, skills = match
+            
+            # Split skills and experience
+            skill_list = [s.strip() for s in skills.split(',')]
+            exp_list = [e.strip() for e in experience.split(',')]
+            
+            resumes.append({
+                "name": name.strip(),
+                "email": email.strip(),
+                "contactNo": contact.strip(),
+                "location": location.strip(),
+                "experience": exp_list,
+                "skills": skill_list
+            })
         
         return {
             "is_resume_response": True,
@@ -386,16 +352,37 @@ def display_resume_grid(resumes, container=None):
                     target.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
-# Use the working agent code
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
 
-# Use the simple prompt that works reliably
-prompt = ChatPromptTemplate.from_messages(
+# Use the prompt that formats resumes in a consistent way for extraction
+agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the "
-            "user asks for candidates or filtering. Otherwise, answer normally.",
+            """You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the
+            user asks for candidates or filtering. Otherwise, answer normally.
+            
+            When displaying resume results, always format them consistently as follows:
+            
+            First, provide a brief introduction line like:
+            "Here are some developers in [location] with [criteria]:"
+            
+            Then, list each candidate in this exact format:
+            
+            [Full Name]
+            
+            Email: [email]
+            Contact No: [phone]
+            Location: [location]
+            Experience: [experience1], [experience2], [experience3]
+            Skills: [skill1], [skill2], [skill3], [skill4]
+            
+            Maintain this precise format with consistent spacing and no bullet points or numbering,
+            as it allows our UI to extract and display the resumes in a grid layout.
+            
+            After listing all candidates, include a brief concluding sentence like:
+            "These candidates have diverse experiences and skills that may suit your needs."
+            """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
@@ -408,7 +395,7 @@ if "memory" not in st.session_state:
         memory_key="chat_history", return_messages=True
     )
 if "agent_executor" not in st.session_state:
-    agent = create_openai_tools_agent(llm, [query_db], prompt)
+    agent = create_openai_tools_agent(llm, [query_db], agent_prompt)
     st.session_state.agent_executor = AgentExecutor(
         agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
@@ -474,20 +461,33 @@ with st.sidebar:
 # Main chat container
 chat_container = st.container()
 
-# Resume results container
-resume_container = st.container()
-
-# Handle user input - use the code from the working agent implementation
+# Handle user input
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
-    # Process with the working agent implementation
+    # Process with agent
     with st.spinner("Thinking..."):
-        # Just as in the working version
-        st.session_state.agent_executor.invoke({"input": user_input})
-        # Force a refresh
-        st.rerun()
+        try:
+            # Invoke the agent
+            response = st.session_state.agent_executor.invoke({"input": user_input})
+            response_text = response["output"]
+            
+            # Process the response
+            processed = process_response(response_text)
+            
+            # Generate a unique key for this message
+            timestamp = datetime.now().isoformat()
+            message_key = f"user_{timestamp}"
+            st.session_state.processed_responses[message_key] = processed
+            
+            # Force a refresh to show the new messages
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            if debug_mode:
+                st.exception(e)
 
-# Display the complete chat history with UI from the working UI version
+# Display the complete chat history
 with chat_container:
     # Create a list to store all resume responses for display in the order they appear
     resume_responses = []

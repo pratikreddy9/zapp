@@ -824,7 +824,7 @@ with chat_container:
                                 
                                 if resume_ids:
                                     # Call get_job_match_counts
-                                    result = get_job_match_counts(resume_ids)
+                                    result = get_job_match_counts.invoke(resume_ids)
                                     if "results" in result:
                                         # Store job match data
                                         for item in result["results"]:

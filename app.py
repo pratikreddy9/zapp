@@ -1,9 +1,9 @@
 """
-ZappBot: Resume‑filtering chatbot with complete chat history
+ZappBot: Resume‑filtering chatbot with optimized display
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
-import os, json, re
+import os, json, re, hashlib
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -197,15 +197,15 @@ def process_response(text):
             resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
             matches = re.findall(resume_pattern, text, re.MULTILINE)
         
-        # Extract any footer text (after all resumes)
-        # This is trickier - look for the last Skills: line and capture everything after it
-        last_skills_pattern = r'Skills:\s*([^\n]+)\s*\n\s*(.*?)$'
-        footer_match = re.search(last_skills_pattern, text, re.DOTALL | re.IGNORECASE)
+        # Extract the conclusion (after all resumes)
+        # Look for lines that contain phrases like "These candidates" or similar conclusion statements
+        conclusion_pattern = r'(These candidates.*?)\s*$'
+        conclusion_match = re.search(conclusion_pattern, text, re.DOTALL)
         
-        footer_text = ""
-        if footer_match:
-            footer_text = footer_match.group(2).strip()
-            
+        conclusion_text = ""
+        if conclusion_match:
+            conclusion_text = conclusion_match.group(1).strip()
+        
         # Convert resume matches to structured data
         resumes = []
         for match in matches:
@@ -228,8 +228,8 @@ def process_response(text):
             "is_resume_response": True,
             "intro_text": intro_text,
             "resumes": resumes,
-            "footer_text": footer_text,
-            "full_text": text  # Keep this for complete chat history
+            "conclusion_text": conclusion_text,
+            "full_text": text  # Keep this for debug purposes
         }
     else:
         # Not a resume listing response
@@ -239,14 +239,16 @@ def process_response(text):
         }
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
-def display_resume_grid(resumes):
+def display_resume_grid(resumes, container=None):
     """Display resumes in a 3x3 grid layout with styled cards."""
+    target = container if container else st
+    
     if not resumes:
-        st.warning("No resumes found matching the criteria.")
+        target.warning("No resumes found matching the criteria.")
         return
     
     # Custom CSS for the resume cards
-    st.markdown("""
+    target.markdown("""
     <style>
     .resume-card {
         border: 1px solid #e1e4e8;
@@ -308,7 +310,7 @@ def display_resume_grid(resumes):
     rows = (num_resumes + 2) // 3  # Ceiling division for number of rows
     
     for row in range(rows):
-        cols = st.columns(3)
+        cols = target.columns(3)
         for col in range(3):
             idx = row * 3 + col
             if idx < num_resumes:
@@ -347,7 +349,7 @@ def display_resume_grid(resumes):
                         html += '</div>'
                     
                     html += '</div>'
-                    st.markdown(html, unsafe_allow_html=True)
+                    target.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
@@ -378,7 +380,8 @@ agent_prompt = ChatPromptTemplate.from_messages(
             Maintain this precise format with consistent spacing and no bullet points or numbering,
             as it allows our UI to extract and display the resumes in a grid layout.
             
-            After listing all candidates, you may include a brief concluding sentence if appropriate.
+            After listing all candidates, include a brief concluding sentence like:
+            "These candidates have diverse experiences and skills that may suit your needs."
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -424,6 +427,22 @@ st.markdown("""
         font-size: 24px;
         font-weight: 600;
     }
+    .resume-section {
+        margin-top: 20px;
+        padding: 15px;
+        border-radius: 8px;
+        background-color: #f8f9fa;
+        border-left: 4px solid #0366d6;
+    }
+    .resume-query {
+        font-weight: 600;
+        margin-bottom: 10px;
+        color: #0366d6;
+    }
+    .st-expander {
+        border: none !important;
+        box-shadow: none !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -442,9 +461,6 @@ with st.sidebar:
 # Main chat container
 chat_container = st.container()
 
-# Resume results container
-resume_container = st.container()
-
 # Handle user input
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
@@ -458,8 +474,9 @@ if user_input:
             # Process the response
             processed = process_response(response_text)
             
-            # Store the processed response with a unique key
-            message_key = f"user_{datetime.now().isoformat()}"
+            # Generate a unique key for this message
+            timestamp = datetime.now().isoformat()
+            message_key = f"user_{timestamp}"
             st.session_state.processed_responses[message_key] = processed
             
             # Force a refresh to show the new messages
@@ -472,11 +489,37 @@ if user_input:
 
 # Display the complete chat history
 with chat_container:
+    # Create a list to store all resume responses for display in the order they appear
+    resume_responses = []
+    
     # Display all messages
     for i, msg in enumerate(st.session_state.memory.chat_memory.messages):
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
-        else:
+            
+            # Store the user query for context if the next message is a resume response
+            if i+1 < len(st.session_state.memory.chat_memory.messages):
+                next_msg = st.session_state.memory.chat_memory.messages[i+1]
+                if next_msg.type == "ai":
+                    # Generate a key for the AI message
+                    ai_msg_key = f"ai_{i+1}"
+                    
+                    # Ensure the message is processed
+                    if ai_msg_key not in st.session_state.processed_responses:
+                        st.session_state.processed_responses[ai_msg_key] = process_response(next_msg.content)
+                    
+                    # Get the processed message
+                    processed_ai = st.session_state.processed_responses[ai_msg_key]
+                    
+                    # If this is a resume response, store it for later display
+                    if processed_ai["is_resume_response"]:
+                        resume_responses.append({
+                            "query": msg.content,
+                            "processed": processed_ai,
+                            "index": i+1
+                        })
+                        
+        else:  # AI message
             # Get or process the AI message
             msg_key = f"ai_{i}"
             if msg_key not in st.session_state.processed_responses:
@@ -487,25 +530,30 @@ with chat_container:
             # Display the message
             ai_message = st.chat_message("assistant")
             
-            # For resume responses, show intro text in the message
+            # For resume responses, only show the intro text in the chat
             if processed["is_resume_response"]:
                 # Just show the intro text in the chat message
                 ai_message.write(processed["intro_text"])
                 
-                # After displaying the message, if this is a resume response,
-                # store the resumes for display in the resume container
-                with resume_container:
-                    if i == len(st.session_state.memory.chat_memory.messages) - 1:  # If this is the latest message
-                        if processed["resumes"]:
-                            st.subheader(f"Resumes Found ({len(processed['resumes'])})")
-                            display_resume_grid(processed["resumes"])
-                        
-                        # Show footer text if it exists
-                        if processed["footer_text"]:
-                            st.write(processed["footer_text"])
+                # If there's a conclusion, add it 
+                if processed.get("conclusion_text"):
+                    ai_message.write(processed["conclusion_text"])
             else:
                 # For non-resume responses, show the full text
                 ai_message.write(processed["full_text"])
+    
+    # Display all resume grids after the chat
+    if resume_responses:
+        st.markdown("---")
+        st.subheader("Resume Search Results")
+        
+        # Create an expander for each resume search
+        for i, resp in enumerate(resume_responses):
+            with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
+                st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
+                display_resume_grid(resp['processed']['resumes'])
+                if resp['processed'].get('conclusion_text'):
+                    st.write(resp['processed']['conclusion_text'])
     
     # Show debug info if enabled
     if debug_mode:
@@ -514,4 +562,11 @@ with chat_container:
             st.json({i: msg.content for i, msg in enumerate(st.session_state.memory.chat_memory.messages)})
             
             st.subheader("Processed Responses")
-            st.json({k: v for k, v in st.session_state.processed_responses.items()})
+            for key, value in st.session_state.processed_responses.items():
+                if "full_text" in value:
+                    # Create a shorter version for display
+                    shorter_value = {k: v for k, v in value.items() if k != "full_text"}
+                    shorter_value["full_text_length"] = len(value["full_text"])
+                    st.json({key: shorter_value})
+                else:
+                    st.json({key: value})

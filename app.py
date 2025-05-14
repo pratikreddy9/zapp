@@ -1,5 +1,5 @@
 """
-Resume‑filtering chatbot with formatted grid display
+Resume‑filtering chatbot with optimized grid display
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
@@ -168,35 +168,68 @@ def query_db(
     except Exception as exc:
         return {"error": str(exc)}
 
-# ── PARSE FORMATTED RESPONSE ────────────────────────────────────────────
-def extract_resumes_from_text(text):
+# ── PARSE AND PROCESS RESPONSE ────────────────────────────────────────
+def process_response(text):
     """
-    Extract resume data from the formatted text response.
-    This function parses the bulleted list format that the agent returns.
+    Process the response text to:
+    1. Extract any introductory text
+    2. Extract resume data
+    3. Remove the resume list from the text to avoid redundancy
     """
-    # Regular expression to find numbered items followed by details
-    resume_pattern = r'(\d+)\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
-    
-    matches = re.findall(resume_pattern, text, re.MULTILINE)
-    
-    resumes = []
-    for match in matches:
-        _, name, email, contact, location, experience, skills = match
+    # First, check if this is a resume-listing response
+    if "Here are some" in text and "Experience:" in text and "Skills:" in text:
+        # Find the introductory text (everything before the first name)
+        # Look for pattern of a blank line followed by a name (text with no indentation)
+        intro_pattern = r'^(.*?)\n\n([A-Z][a-z]+.*?)\n\nEmail:'
+        intro_match = re.search(intro_pattern, text, re.DOTALL)
         
-        # Split skills and experience by commas
-        skill_list = [s.strip() for s in skills.split(',')]
-        exp_list = [e.strip() for e in experience.split(',')]
+        intro_text = ""
+        if intro_match:
+            intro_text = intro_match.group(1).strip()
         
-        resumes.append({
-            "name": name.strip(),
-            "email": email.strip(),
-            "contactNo": contact.strip(),
-            "location": location.strip(),
-            "experience": exp_list,
-            "skills": skill_list
-        })
-    
-    return resumes
+        # Extract the resumes
+        resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
+        matches = re.findall(resume_pattern, text, re.MULTILINE)
+        
+        # Extract any footer text (after all resumes)
+        # This is trickier - look for the last Skills: line and capture everything after it
+        last_skills_pattern = r'Skills:\s*([^\n]+)\s*\n\s*(.*?)$'
+        footer_match = re.search(last_skills_pattern, text, re.DOTALL)
+        
+        footer_text = ""
+        if footer_match:
+            footer_text = footer_match.group(2).strip()
+            
+        # Convert resume matches to structured data
+        resumes = []
+        for match in matches:
+            name, email, contact, location, experience, skills = match
+            
+            # Split skills and experience
+            skill_list = [s.strip() for s in skills.split(',')]
+            exp_list = [e.strip() for e in experience.split(',')]
+            
+            resumes.append({
+                "name": name.strip(),
+                "email": email.strip(),
+                "contactNo": contact.strip(),
+                "location": location.strip(),
+                "experience": exp_list,
+                "skills": skill_list
+            })
+        
+        return {
+            "is_resume_response": True,
+            "intro_text": intro_text,
+            "resumes": resumes,
+            "footer_text": footer_text
+        }
+    else:
+        # Not a resume listing response
+        return {
+            "is_resume_response": False,
+            "full_text": text
+        }
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
 def display_resume_grid(resumes):
@@ -320,17 +353,25 @@ agent_prompt = ChatPromptTemplate.from_messages(
             """You are a helpful HR assistant. Use the `query_db` tool whenever the
             user asks for candidates or filtering. Otherwise, answer normally.
             
-            When displaying resume results, always use this exact format for each candidate:
+            When displaying resume results, always format them consistently as follows:
             
-            1. **Full Name**
-               - **Email:** email@example.com
-               - **Contact No:** contact number
-               - **Location:** location
-               - **Experience:** experience1, experience2, experience3
-               - **Skills:** skill1, skill2, skill3, skill4
+            First, provide a brief introduction line like:
+            "Here are some developers in [location] with [criteria]:"
             
-            Maintain this precise format with the exact same headings, as it allows our UI
-            to extract and display the resumes in a grid layout.
+            Then, list each candidate in this exact format:
+            
+            [Full Name]
+            
+            Email: [email]
+            Contact No: [phone]
+            Location: [location]
+            Experience: [experience1], [experience2], [experience3]
+            Skills: [skill1], [skill2], [skill3], [skill4]
+            
+            Maintain this precise format with consistent spacing and no bullet points or numbering,
+            as it allows our UI to extract and display the resumes in a grid layout.
+            
+            After listing all candidates, you may include a brief concluding sentence if appropriate.
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -349,9 +390,9 @@ if "agent_executor" not in st.session_state:
         agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
 
-# Track the latest resumes found
-if "last_resumes" not in st.session_state:
-    st.session_state.last_resumes = []
+# Track the latest processed response
+if "last_processed_response" not in st.session_state:
+    st.session_state.last_processed_response = None
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
 st.set_page_config(page_title="Resume Filtering Chatbot", layout="wide")
@@ -388,7 +429,7 @@ with st.sidebar:
     debug_mode = st.checkbox("Debug Mode", value=False)
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
-        st.session_state.last_resumes = []
+        st.session_state.last_processed_response = None
         st.rerun()
 
 # Handle user input
@@ -404,27 +445,37 @@ if user_input:
             response = st.session_state.agent_executor.invoke({"input": user_input})
             response_text = response["output"]
             
-            # Display the assistant's response
-            ai_message = st.chat_message("assistant")
-            ai_message.write(response_text)
+            # Process the response
+            processed = process_response(response_text)
+            st.session_state.last_processed_response = processed
             
-            # Extract resumes from the response
-            extracted_resumes = extract_resumes_from_text(response_text)
-            if extracted_resumes:
-                st.session_state.last_resumes = extracted_resumes
+            # Display the response appropriately
+            ai_message = st.chat_message("assistant")
+            
+            if processed["is_resume_response"]:
+                # Only show introductory text, not the full resume listing
+                ai_message.write(processed["intro_text"])
                 
-                # Display the resumes in a grid below the conversation
-                st.subheader(f"Resumes Found ({len(extracted_resumes)})")
-                display_resume_grid(extracted_resumes)
+                # Show the resumes in a grid
+                if processed["resumes"]:
+                    st.subheader(f"Resumes Found ({len(processed['resumes'])})")
+                    display_resume_grid(processed["resumes"])
                 
+                # Show footer text if it exists
+                if processed["footer_text"]:
+                    st.write(processed["footer_text"])
+            else:
+                # For non-resume responses, show the full text
+                ai_message.write(processed["full_text"])
+            
             # Show debug info if enabled
             if debug_mode:
                 st.subheader("Debug Information")
                 st.json(response)
                 
-                if extracted_resumes:
-                    st.subheader("Extracted Resume Data")
-                    st.json(extracted_resumes)
+                if processed["is_resume_response"]:
+                    st.subheader("Processed Resume Data")
+                    st.json(processed)
                 
         except Exception as e:
             st.error(f"Error: {str(e)}")
@@ -436,9 +487,21 @@ else:
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
         else:
-            st.chat_message("assistant").write(msg.content)
+            # Process and display message
+            processed = process_response(msg.content)
+            
+            if processed["is_resume_response"]:
+                # Only show intro for resume responses in history
+                st.chat_message("assistant").write(processed["intro_text"])
+            else:
+                # Show full text for non-resume responses
+                st.chat_message("assistant").write(processed["full_text"])
     
-    # If we have resumes from the last query, display them
-    if st.session_state.last_resumes:
-        st.subheader(f"Resumes Found ({len(st.session_state.last_resumes)})")
-        display_resume_grid(st.session_state.last_resumes)
+    # If we have a processed response with resumes, display them
+    if st.session_state.last_processed_response and st.session_state.last_processed_response["is_resume_response"]:
+        st.subheader(f"Resumes Found ({len(st.session_state.last_processed_response['resumes'])})")
+        display_resume_grid(st.session_state.last_processed_response["resumes"])
+        
+        # Show footer text if it exists
+        if st.session_state.last_processed_response["footer_text"]:
+            st.write(st.session_state.last_processed_response["footer_text"])

@@ -1,5 +1,5 @@
 """
-ZappBot: Optimized Resume‑filtering chatbot with reliable tool usage
+ZappBot: Resume filtering chatbot with minimal UI enhancement
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
@@ -168,85 +168,48 @@ def query_db(
     except Exception as exc:
         return {"error": str(exc)}
 
-# ── PARSE AND PROCESS RESPONSE ────────────────────────────────────────
-def process_response(text):
-    """
-    Process the response text to extract resume data for display.
-    Returns original text for the chat along with structured data for display.
-    """
-    # First, check if this is a resume-listing response
-    if "Here are some" in text and ("Experience:" in text or "experience:" in text) and ("Skills:" in text or "skills:" in text):
-        # Find the introductory text (everything before the first name)
-        # Look for pattern of a blank line followed by a name (text with no indentation)
-        intro_pattern = r'^(.*?)\n\n([A-Z][a-z]+.*?)\n\nEmail:'
-        intro_match = re.search(intro_pattern, text, re.DOTALL)
+# ── PARSE RESUMES FOR DISPLAY ─────────────────────────────────────────
+def extract_resumes_from_text(text):
+    """Extract candidate information from a formatted text response."""
+    resumes = []
+
+    # Various patterns to match different potential formats
+    # Try to match the standard format first (most common)
+    pattern1 = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
+    matches = re.findall(pattern1, text, re.MULTILINE)
+    
+    # If that didn't work, try the numbered format
+    if not matches:
+        pattern2 = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
+        matches = re.findall(pattern2, text, re.MULTILINE)
+    
+    # Convert matches to structured data
+    for match in matches:
+        name, email, phone, location, experience, skills = match
         
-        intro_text = ""
-        if intro_match:
-            intro_text = intro_match.group(1).strip()
+        # Parse experience and skills
+        exp_list = [e.strip() for e in experience.split(',')]
+        skill_list = [s.strip() for s in skills.split(',')]
         
-        # Extract the resumes - accommodate both formats (numbered and unnumbered)
-        # First try standard format with blank lines
-        resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
-        matches = re.findall(resume_pattern, text, re.MULTILINE | re.IGNORECASE)
+        resumes.append({
+            "name": name.strip(),
+            "email": email.strip(),
+            "contactNo": phone.strip(),
+            "location": location.strip(),
+            "experience": exp_list,
+            "skills": skill_list
+        })
         
-        # If that didn't work, try the numbered format
-        if not matches:
-            resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
-            matches = re.findall(resume_pattern, text, re.MULTILINE)
-        
-        # Extract the conclusion (after all resumes)
-        # Look for lines that contain phrases like "These candidates" or similar conclusion statements
-        conclusion_pattern = r'(These candidates.*?)\s*$'
-        conclusion_match = re.search(conclusion_pattern, text, re.DOTALL)
-        
-        conclusion_text = ""
-        if conclusion_match:
-            conclusion_text = conclusion_match.group(1).strip()
-        
-        # Convert resume matches to structured data
-        resumes = []
-        for match in matches:
-            name, email, contact, location, experience, skills = match
-            
-            # Split skills and experience
-            skill_list = [s.strip() for s in skills.split(',')]
-            exp_list = [e.strip() for e in experience.split(',')]
-            
-            resumes.append({
-                "name": name.strip(),
-                "email": email.strip(),
-                "contactNo": contact.strip(),
-                "location": location.strip(),
-                "experience": exp_list,
-                "skills": skill_list
-            })
-        
-        return {
-            "is_resume_response": True,
-            "intro_text": intro_text,
-            "resumes": resumes,
-            "conclusion_text": conclusion_text,
-            "full_text": text  # Keep this for chat display
-        }
-    else:
-        # Not a resume listing response
-        return {
-            "is_resume_response": False,
-            "full_text": text
-        }
+    return resumes
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
-def display_resume_grid(resumes, container=None):
+def display_resume_grid(resumes):
     """Display resumes in a 3x3 grid layout with styled cards."""
-    target = container if container else st
-    
     if not resumes:
-        target.warning("No resumes found matching the criteria.")
         return
     
     # Custom CSS for the resume cards
-    target.markdown("""
+    st.markdown("""
     <style>
     .resume-card {
         border: 1px solid #e1e4e8;
@@ -308,7 +271,7 @@ def display_resume_grid(resumes, container=None):
     rows = (num_resumes + 2) // 3  # Ceiling division for number of rows
     
     for row in range(rows):
-        cols = target.columns(3)
+        cols = st.columns(3)
         for col in range(3):
             idx = row * 3 + col
             if idx < num_resumes:
@@ -347,37 +310,18 @@ def display_resume_grid(resumes, container=None):
                         html += '</div>'
                     
                     html += '</div>'
-                    target.markdown(html, unsafe_allow_html=True)
+                    st.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
 
-# Use a simple prompt, similar to the original version that worked well with tools
-agent_prompt = ChatPromptTemplate.from_messages(
+# Use the exact same prompt as the original working version, just rename to ZappBot
+prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            """You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the
-            user asks for candidates or filtering. Otherwise, answer normally.
-            
-            When displaying resume results, always format them consistently as follows:
-            
-            First, provide a brief introduction line like:
-            "Here are some developers in [location] with [criteria]:"
-            
-            Then, list each candidate in this exact format:
-            
-            [Full Name]
-            
-            Email: [email]
-            Contact No: [phone]
-            Location: [location]
-            Experience: [experience1], [experience2], [experience3]
-            Skills: [skill1], [skill2], [skill3], [skill4]
-            
-            After listing all candidates, include a brief concluding sentence like:
-            "These candidates have diverse experiences and skills that may suit your needs."
-            """,
+            "You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the "
+            "user asks for candidates or filtering. Otherwise, answer normally.",
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
@@ -390,18 +334,10 @@ if "memory" not in st.session_state:
         memory_key="chat_history", return_messages=True
     )
 if "agent_executor" not in st.session_state:
-    agent = create_openai_tools_agent(llm, [query_db], agent_prompt)
+    agent = create_openai_tools_agent(llm, [query_db], prompt)
     st.session_state.agent_executor = AgentExecutor(
         agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
-
-# Store processed responses for each message to avoid re-processing
-if "processed_responses" not in st.session_state:
-    st.session_state.processed_responses = {}
-
-# Track the latest search results
-if "last_search_results" not in st.session_state:
-    st.session_state.last_search_results = None
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
 st.set_page_config(page_title="ZappBot", layout="wide")
@@ -426,13 +362,6 @@ st.markdown("""
         font-size: 24px;
         font-weight: 600;
     }
-    .resume-section {
-        margin-top: 20px;
-        padding: 15px;
-        border-radius: 8px;
-        background-color: #f8f9fa;
-        border-left: 4px solid #0366d6;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -445,81 +374,32 @@ with st.sidebar:
     debug_mode = st.checkbox("Debug Mode", value=False)
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
-        st.session_state.processed_responses = {}
-        st.session_state.last_search_results = None
         st.rerun()
 
 # Handle user input
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
-    # Show user message
-    st.chat_message("user").write(user_input)
-    
-    # Process with agent
+    # Execute exactly like the original working version
     with st.spinner("Thinking..."):
-        try:
-            # Invoke the agent (with the simple approach that works well)
-            response = st.session_state.agent_executor.invoke({"input": user_input})
-            response_text = response["output"]
-            
-            # Process the response to extract resume data while preserving original text
-            processed = process_response(response_text)
-            
-            # Show the assistant's response (full text for reliability)
-            st.chat_message("assistant").write(processed["full_text"])
-            
-            # If this is a resume response, save it for display in the grid
-            if processed["is_resume_response"]:
-                st.session_state.last_search_results = processed["resumes"]
-            
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            if debug_mode:
-                st.exception(e)
-else:
-    # Display chat history
-    for i, msg in enumerate(st.session_state.memory.chat_memory.messages):
-        if msg.type == "human":
-            st.chat_message("user").write(msg.content)
-        else:
-            # Process the assistant's message to parse resume data
-            msg_key = f"ai_{i}"
-            if msg_key not in st.session_state.processed_responses:
-                processed = process_response(msg.content)
-                st.session_state.processed_responses[msg_key] = processed
-                
-                # Update last search results if this is a resume response
-                if processed["is_resume_response"]:
-                    st.session_state.last_search_results = processed["resumes"]
-            else:
-                processed = st.session_state.processed_responses[msg_key]
-            
-            # Display the full message for reliability
-            st.chat_message("assistant").write(msg.content)
+        # This is the key part that worked in the original - invoke without manual response handling
+        result = st.session_state.agent_executor.invoke({"input": user_input})
 
-# Display the latest resume search results in a grid if available
-if st.session_state.last_search_results:
-    st.markdown("---")
-    st.subheader("Latest Resume Results")
-    display_resume_grid(st.session_state.last_search_results)
-    
+# Display chat history with enhanced resume display
+for msg in st.session_state.memory.chat_memory.messages:
+    if msg.type == "human":
+        st.chat_message("user").write(msg.content)
+    else:
+        # First, display the complete message text for full reliability
+        ai_message = st.chat_message("assistant")
+        ai_message.write(msg.content)
+        
+        # Then check if this is a resume response and render the grid
+        resumes = extract_resumes_from_text(msg.content)
+        if resumes:
+            display_resume_grid(resumes)
+
 # Show debug info if enabled
 if debug_mode:
     with st.expander("Debug Information"):
         st.subheader("Memory Contents")
         st.json({i: msg.content for i, msg in enumerate(st.session_state.memory.chat_memory.messages)})
-        
-        st.subheader("Processed Responses")
-        for key, value in st.session_state.processed_responses.items():
-            if "full_text" in value:
-                # Create a shorter version for display
-                shorter_value = {k: v for k, v in value.items() if k != "full_text"}
-                shorter_value["full_text_length"] = len(value["full_text"])
-                st.json({key: shorter_value})
-            else:
-                st.json({key: value})
-        
-        st.subheader("Last Search Results")
-        if st.session_state.last_search_results:
-            st.write(f"Found {len(st.session_state.last_search_results)} resumes")
-            st.json(st.session_state.last_search_results[0] if st.session_state.last_search_results else None)

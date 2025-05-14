@@ -289,6 +289,32 @@ def process_response(text):
             "full_text": text
         }
 
+# ── HELPER: attach missing resumeIds without showing them ──────────────
+def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
+    """
+    For every resume in resume_list that lacks a 'resumeId', look it up by (email, contactNo)
+    and add it. Nothing is displayed to the user because display_resume_grid ignores the field
+    unless debug mode.
+    """
+    if not resume_list:
+        return
+    
+    with get_mongo_client() as client:
+        coll = client[DB_NAME][COLL_NAME]
+        for res in resume_list:
+            if "resumeId" in res and res["resumeId"]:
+                continue
+            email = res.get("email")
+            phone = res.get("contactNo")
+            if email and phone:
+                doc = coll.find_one(
+                    {"email": email, "contactNo": phone},
+                    {"_id": 0, "resumeId": 1},
+                )
+                if doc and doc.get("resumeId"):
+                    res["resumeId"] = doc["resumeId"]
+
+
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
 def display_resume_grid(resumes, container=None):
     """Display resumes in a 3x3 grid layout with styled cards."""
@@ -706,6 +732,8 @@ with chat_container:
             with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
                 st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
                 
+                attach_hidden_resume_ids(resp['processed']['resumes'])
+            
                 # Add job match data to resumes if available
                 if st.session_state.job_match_data:
                     for resume in resp['processed']['resumes']:

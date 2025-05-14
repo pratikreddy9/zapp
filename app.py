@@ -790,7 +790,7 @@ with chat_container:
                     if item.get("name") and item.get("resumeId"):
                         st.session_state.resume_ids[item["name"]] = item["resumeId"]
                         
-                ai_message.write(processed["intro_text"]
+                ai_message.write(processed["intro_text"])
                 
                 # If there's a conclusion, add it 
                 if processed.get("conclusion_text"):

@@ -786,7 +786,11 @@ with chat_container:
                 
                 hidden_meta = json.dumps([{"name": r.get("name"), "resumeId": r.get("resumeId", "")}for r in processed["resumes"]])
                 # Just show the intro text in the chat message
-                ai_message.write(processed["intro_text"] + f"\n<!--RESUME_META:{hidden_meta}-->")
+                for item in json.loads(hidden_meta):
+                    if item.get("name") and item.get("resumeId"):
+                        st.session_state.resume_ids[item["name"]] = item["resumeId"]
+                        
+                ai_message.write(processed["intro_text"]
                 
                 # If there's a conclusion, add it 
                 if processed.get("conclusion_text"):

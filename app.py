@@ -1,5 +1,5 @@
 """
-Resume‑filtering chatbot with conversation memory + tile UI
+Resume‑filtering chatbot with conversation memory and debugging
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
@@ -105,13 +105,17 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": EVALUATOR_PROMPT},
-            {"role": "user", "content": f"Query: {query}\n\nResumes: {json.dumps(resumes)}"},
+            {
+                "role": "user",
+                "content": f"Query: {query}\n\nResumes: {json.dumps(resumes)}",
+            },
         ],
     )
-    return json.loads(chat.choices[0].message.content).get("top_resume_ids", [])
+    content = json.loads(chat.choices[0].message.content)
+    return content.get("top_resume_ids", [])
 
 # ── TOOL: query_db ─────────────────────────────────────────────────────
-@tool(description="Filter MongoDB resumes and return the 10 best matches.")
+@tool
 def query_db(
     query: str,
     country: Optional[str] = None,
@@ -121,6 +125,7 @@ def query_db(
     skills: Optional[List[str]] = None,
     top_k: int = TOP_K_DEFAULT,
 ) -> Dict[str, Any]:
+    """Filter MongoDB resumes and return top 10 matches."""
     try:
         mongo_q: Dict[str, Any] = {}
         if country:
@@ -136,10 +141,14 @@ def query_db(
             and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
         if isinstance(min_experience_years, int) and min_experience_years > 0:
             and_clauses.append(
-                {"$expr": {"$gte": [
-                    {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
-                    min_experience_years,
-                ]}}
+                {
+                    "$expr": {
+                        "$gte": [
+                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
+                            min_experience_years,
+                        ]
+                    }
+                }
             )
         if and_clauses:
             mongo_q["$and"] = and_clauses
@@ -159,50 +168,143 @@ def query_db(
     except Exception as exc:
         return {"error": str(exc)}
 
+# ── SIMPLE RESUME DISPLAY FUNCTION ───────────────────────────────────────
+def display_resume_grid(resumes):
+    """Display resumes in a simple grid layout."""
+    if not resumes:
+        st.warning("No resumes found matching the criteria.")
+        return
+    
+    # Apply some basic CSS for resume cards
+    st.markdown("""
+    <style>
+    .resume-card {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 15px;
+        background-color: white;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .resume-name {
+        font-weight: bold;
+        font-size: 16px;
+        margin-bottom: 10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Create a 3-column grid
+    cols = st.columns(3)
+    
+    # Distribute resumes across columns
+    for i, resume in enumerate(resumes):
+        col_idx = i % 3
+        
+        with cols[col_idx]:
+            name = resume.get("name", "Unknown")
+            email = resume.get("email", "")
+            st.markdown(f"""
+            <div class="resume-card">
+                <div class="resume-name">{name}</div>
+                <p>Email: {email}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful HR assistant. Use the `query_db` tool whenever the user asks for candidates or filtering. Otherwise, answer normally."),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("user", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad"),
-])
+prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a helpful HR assistant. Use the `query_db` tool whenever the "
+            "user asks for candidates or filtering. Otherwise, answer normally.",
+        ),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("user", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ]
+)
 if "memory" not in st.session_state:
-    st.session_state.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    st.session_state.memory = ConversationBufferMemory(
+        memory_key="chat_history", return_messages=True
+    )
 if "agent_executor" not in st.session_state:
     agent = create_openai_tools_agent(llm, [query_db], prompt)
-    st.session_state.agent_executor = AgentExecutor(agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=False)
+    st.session_state.agent_executor = AgentExecutor(
+        agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
+    )
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
 st.title("🧠 Resume Filtering Chatbot")
 
+# Add debugging tools
+with st.sidebar:
+    st.header("Debug Tools")
+    debug_mode = st.checkbox("Show Debug Info", value=True)
+    if st.button("Clear Chat History"):
+        st.session_state.memory.clear()
+        st.rerun()
+
+# Handle user input
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
+    # Display user message
+    st.chat_message("user").write(user_input)
+    
+    # Process with agent
     with st.spinner("Thinking..."):
-        st.session_state.agent_executor.invoke({"input": user_input})
-
-for msg in st.session_state.memory.chat_memory.messages:
-    if msg.type == "human":
-        st.chat_message("user").write(msg.content)
-    else:
-        if isinstance(msg.content, dict) and msg.content.get("results"):
-            candidates = msg.content["results"]
-            if candidates:
-                st.subheader("📋 Candidates")
-                for i in range(0, len(candidates), 3):
-                    cols = st.columns(3, gap="large")
-                    for j, cand in enumerate(candidates[i : i + 3]):
-                        with cols[j]:
-                            st.markdown(
-                                f"<div style='border:1px solid #ddd;border-radius:8px;padding:10px;'>"
-                                f"<strong>{cand.get('name','No Name')}</strong><br>"
-                                f"<em>{cand.get('jobExperiences',[{{}}])[0].get('title','')}</em><br><br>"
-                                f"<b>Email:</b> {cand.get('email','-')}<br>"
-                                f"<b>Contact:</b> {cand.get('contactNo','-')}<br>"
-                                f"<b>Location:</b> {cand.get('address',cand.get('country','-'))}<br>"
-                                f"<b>Skills:</b> {', '.join(cand.get('keywords',[])[:8])}"
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
+        try:
+            # Invoke the agent
+            response = st.session_state.agent_executor.invoke({"input": user_input})
+            
+            # Display the assistant's response
+            st.chat_message("assistant").write(response["output"])
+            
+            # Debug information
+            if debug_mode:
+                st.subheader("🔍 Debug Information")
+                
+                # Show the raw response
+                st.markdown("### Raw Response")
+                st.json(response)
+                
+                # Try to extract the tool outputs 
+                st.markdown("### Tool Outputs")
+                try:
+                    # Check if there are intermediate steps with tool outputs
+                    if "intermediate_steps" in response:
+                        for i, step in enumerate(response["intermediate_steps"]):
+                            st.markdown(f"#### Step {i+1}")
+                            # Tool call
+                            action = step[0]
+                            st.markdown(f"**Tool:** {action.tool}")
+                            st.markdown(f"**Input:** {action.tool_input}")
+                            
+                            # Tool output
+                            output = step[1]
+                            st.markdown("**Output:**")
+                            st.json(output)
+                            
+                            # If this is query_db and it has results, display them
+                            if action.tool == "query_db" and isinstance(output, dict) and "results" in output:
+                                st.markdown("#### Resume Results")
+                                st.write(f"Found {len(output['results'])} resumes")
+                                
+                                # Display resumes in a simple grid
+                                display_resume_grid(output["results"])
+                    else:
+                        st.write("No tool outputs found in the response")
+                except Exception as e:
+                    st.error(f"Error extracting tool outputs: {str(e)}")
+                    
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            st.exception(e)
+else:
+    # Display chat history
+    for msg in st.session_state.memory.chat_memory.messages:
+        if msg.type == "human":
+            st.chat_message("user").write(msg.content)
         else:
             st.chat_message("assistant").write(msg.content)

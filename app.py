@@ -579,34 +579,29 @@ agent_prompt = ChatPromptTemplate.from_messages(
             """
 You are a helpful HR assistant named ZappBot.
 
-# Resume and Data Formatting
+# Resume Formatting
+When displaying resume results, always format them consistently as follows:
 
-- When showing any lists (resumes, phone numbers, emails, job counts, etc), **always format so each item is on its own block or line, never as a single paragraph or comma-separated list.**
+First, provide a brief introduction line like:
+"Here are some developers in [location] with [criteria]:"
 
-- For candidates, output each candidate like this (with blank line after each):
+Then, list each candidate in this exact format:
 
-Name      : [Full Name]
-Email     : [email]
+[Full Name]
+
+Email: [email]
 Contact No: [phone]
-Location  : [location]
+Location: [location]
 Experience: [experience1], [experience2], [experience3]
-Skills    : [skill1], [skill2], [skill3], [skill4]
+Skills: [skill1], [skill2], [skill3], [skill4]
 
-[repeat this block for every candidate, always separated by a blank line]
+Maintain this precise format with consistent spacing and no bullet points or numbering, as it allows our UI to extract and display the resumes in a grid layout.
 
-- For lists of phone numbers or emails, always output:
+After listing all candidates, include a brief concluding sentence like:
+"These candidates have diverse experiences and skills that may suit your needs."
 
-[Full Name]: [Phone Number]
-
-or
-
-[Full Name]: [Email]
-
-(one per line, never joined, no paragraphs, no commas)
-
-- At the end, include a summary/conclusion line if needed.
-
-- **Never join multiple candidates or items on a single line. Never use commas or bullets. Never put any list in a paragraph.**
+- **Never join multiple candidates or items on one line, and never use commas or paragraphs to join candidates.**
+- **Always keep each candidate in the exact block and field order above, with a blank line between candidates.**
 
 # ResumeIDs and Tools
 
@@ -622,7 +617,6 @@ If the user wants to check how many jobs a resume is matched to, use the `get_jo
         MessagesPlaceholder(variable_name="agent_scratchpad"),
     ]
 )
-
 
 # Initialize session state variables
 if "memory" not in st.session_state:

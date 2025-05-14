@@ -1,7 +1,12 @@
 """
-ZappBot: Resume‑filtering chatbot with optimized display
+ZappBot: Resume‑filtering chatbot with optimized display + email sender
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
+
+# ⬇︎ only four new imports
+import smtplib, ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import os, json, re, hashlib
 from datetime import datetime
@@ -20,6 +25,11 @@ import openai
 
 # ── CONFIG ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+
+# ⬇︎ new SMTP constants (use Gmail App‑Password with no spaces)
+SMTP_HOST, SMTP_PORT = "smtp.gmail.com", 465
+SMTP_USER, SMTP_PASS = st.secrets["SMTP_USER"], st.secrets["SMTP_PASS"]
+
 MONGO_CFG = {
     "host": "notify.pesuacademy.com",
     "port": 27017,
@@ -105,16 +115,13 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": EVALUATOR_PROMPT},
-            {
-                "role": "user",
-                "content": f"Query: {query}\n\nResumes: {json.dumps(resumes)}",
-            },
+            {"role": "user", "content": f"Query: {query}\n\nResumes: {json.dumps(resumes)}"},
         ],
     )
     content = json.loads(chat.choices[0].message.content)
     return content.get("top_resume_ids", [])
 
-# ── TOOL: query_db ─────────────────────────────────────────────────────
+# ── TOOL: query_db  (unchanged logic) ─────────────────────────────────
 @tool
 def query_db(
     query: str,
@@ -167,6 +174,22 @@ def query_db(
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
         return {"error": str(exc)}
+
+# ── TOOL: send_email  (new) ────────────────────────────────────────────
+@tool
+def send_email(to: str, subject: str, body: str) -> str:
+    """Send an HTML email using SMTP_USER / SMTP_PASS from secrets.toml."""
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"], msg["From"], msg["To"] = subject, SMTP_USER, to
+        msg.attach(MIMEText(body, "html"))
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx) as srv:
+            srv.login(SMTP_USER, SMTP_PASS)
+            srv.send_message(msg)
+        return "Email sent!"
+    except Exception as e:
+        return f"Email failed: {e}"
 
 # ── PARSE AND PROCESS RESPONSE ────────────────────────────────────────
 def process_response(text):
@@ -382,6 +405,8 @@ agent_prompt = ChatPromptTemplate.from_messages(
             
             After listing all candidates, include a brief concluding sentence like:
             "These candidates have diverse experiences and skills that may suit your needs."
+            
+            If the user asks to email or send these results, call the `send_email` tool.
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -395,9 +420,9 @@ if "memory" not in st.session_state:
         memory_key="chat_history", return_messages=True
     )
 if "agent_executor" not in st.session_state:
-    agent = create_openai_tools_agent(llm, [query_db], agent_prompt)
+    agent = create_openai_tools_agent(llm, [query_db, send_email], agent_prompt)  # ← added send_email
     st.session_state.agent_executor = AgentExecutor(
-        agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
+        agent=agent, tools=[query_db, send_email], memory=st.session_state.memory, verbose=True
     )
 
 # Store processed responses for each message to avoid re-processing
@@ -453,6 +478,13 @@ st.markdown('<div class="header-container"><div class="header-emoji">⚡</div><d
 with st.sidebar:
     st.header("Settings")
     debug_mode = st.checkbox("Debug Mode", value=False)
+    
+    # Email settings section
+    st.subheader("Email Settings")
+    default_recipient = st.text_input("Default Email Recipient", 
+                                      placeholder="recipient@example.com",
+                                      help="Default email to use when sending resume results")
+    
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
         st.session_state.processed_responses = {}
@@ -552,6 +584,63 @@ with chat_container:
             with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
                 st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
                 display_resume_grid(resp['processed']['resumes'])
+                
+                # Add email button for this search result
+                if resp['processed']['resumes']:
+                    cols = st.columns([3, 1])
+                    with cols[1]:
+                        if st.button(f"📧 Email Results", key=f"email_btn_{i}"):
+                            try:
+                                # Generate HTML email with resume cards
+                                html_body = f"""
+                                <h2>Resume Search Results</h2>
+                                <p><strong>Search Query:</strong> {resp['query']}</p>
+                                <p>{resp['processed']['intro_text']}</p>
+                                <div style="margin: 20px 0;">
+                                """
+                                
+                                # Add each resume to the email
+                                for resume in resp['processed']['resumes']:
+                                    name = resume.get("name", "Unknown")
+                                    email = resume.get("email", "")
+                                    phone = resume.get("contactNo", "")
+                                    location = resume.get("location", "")
+                                    experience = ", ".join(resume.get("experience", []))
+                                    skills = ", ".join(resume.get("skills", []))
+                                    
+                                    html_body += f"""
+                                    <div style="border: 1px solid #e1e4e8; border-radius: 8px; padding: 15px; margin-bottom: 15px;">
+                                        <h3 style="margin-top: 0;">{name}</h3>
+                                        <p>📍 {location}</p>
+                                        <p>📧 {email}</p>
+                                        <p>📱 {phone}</p>
+                                        <p><strong>Experience:</strong> {experience}</p>
+                                        <p><strong>Skills:</strong> {skills}</p>
+                                    </div>
+                                    """
+                                
+                                html_body += f"""
+                                </div>
+                                <p>{resp['processed'].get('conclusion_text', '')}</p>
+                                <p>Sent by ZappBot</p>
+                                """
+                                
+                                # Get recipient email
+                                recipient = default_recipient
+                                if not recipient:
+                                    st.error("Please set a default email recipient in the sidebar.")
+                                else:
+                                    # Send the email
+                                    result = send_email(
+                                        to=recipient,
+                                        subject=f"ZappBot Results: {resp['query']}",
+                                        body=html_body
+                                    )
+                                    st.success(f"Email sent to {recipient}")
+                            except Exception as e:
+                                st.error(f"Failed to send email: {str(e)}")
+                
+                # Display conclusion if available
                 if resp['processed'].get('conclusion_text'):
                     st.write(resp['processed']['conclusion_text'])
     

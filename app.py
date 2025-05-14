@@ -1,9 +1,9 @@
 """
-Resume‑filtering chatbot with conversation memory and debugging
+Resume‑filtering chatbot with formatted grid display
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
-import os, json
+import os, json, re
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -168,88 +168,233 @@ def query_db(
     except Exception as exc:
         return {"error": str(exc)}
 
-# ── SIMPLE RESUME DISPLAY FUNCTION ───────────────────────────────────────
+# ── PARSE FORMATTED RESPONSE ────────────────────────────────────────────
+def extract_resumes_from_text(text):
+    """
+    Extract resume data from the formatted text response.
+    This function parses the bulleted list format that the agent returns.
+    """
+    # Regular expression to find numbered items followed by details
+    resume_pattern = r'(\d+)\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
+    
+    matches = re.findall(resume_pattern, text, re.MULTILINE)
+    
+    resumes = []
+    for match in matches:
+        _, name, email, contact, location, experience, skills = match
+        
+        # Split skills and experience by commas
+        skill_list = [s.strip() for s in skills.split(',')]
+        exp_list = [e.strip() for e in experience.split(',')]
+        
+        resumes.append({
+            "name": name.strip(),
+            "email": email.strip(),
+            "contactNo": contact.strip(),
+            "location": location.strip(),
+            "experience": exp_list,
+            "skills": skill_list
+        })
+    
+    return resumes
+
+# ── DISPLAY RESUME GRID ───────────────────────────────────────────────
 def display_resume_grid(resumes):
-    """Display resumes in a simple grid layout."""
+    """Display resumes in a 3x3 grid layout with styled cards."""
     if not resumes:
         st.warning("No resumes found matching the criteria.")
         return
     
-    # Apply some basic CSS for resume cards
+    # Custom CSS for the resume cards
     st.markdown("""
     <style>
     .resume-card {
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        padding: 15px;
+        border: 1px solid #e1e4e8;
+        border-radius: 10px;
+        padding: 16px;
         margin-bottom: 15px;
         background-color: white;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        box-shadow: 0 3px 8px rgba(0,0,0,0.05);
+        height: 100%;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .resume-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
     .resume-name {
         font-weight: bold;
-        font-size: 16px;
+        font-size: 18px;
+        margin-bottom: 8px;
+        color: #24292e;
+    }
+    .resume-location {
+        color: #586069;
+        font-size: 14px;
         margin-bottom: 10px;
+    }
+    .resume-contact {
+        margin-bottom: 8px;
+        font-size: 14px;
+        color: #444d56;
+    }
+    .resume-section-title {
+        font-weight: 600;
+        margin-top: 12px;
+        margin-bottom: 6px;
+        font-size: 15px;
+        color: #24292e;
+    }
+    .resume-experience {
+        font-size: 14px;
+        color: #444d56;
+        margin-bottom: 4px;
+    }
+    .skill-tag {
+        display: inline-block;
+        background-color: #f1f8ff;
+        color: #0366d6;
+        border-radius: 12px;
+        padding: 3px 10px;
+        margin: 3px;
+        font-size: 12px;
+        font-weight: 500;
     }
     </style>
     """, unsafe_allow_html=True)
     
     # Create a 3-column grid
-    cols = st.columns(3)
+    num_resumes = len(resumes)
+    rows = (num_resumes + 2) // 3  # Ceiling division for number of rows
     
-    # Distribute resumes across columns
-    for i, resume in enumerate(resumes):
-        col_idx = i % 3
-        
-        with cols[col_idx]:
-            name = resume.get("name", "Unknown")
-            email = resume.get("email", "")
-            st.markdown(f"""
-            <div class="resume-card">
-                <div class="resume-name">{name}</div>
-                <p>Email: {email}</p>
-            </div>
-            """, unsafe_allow_html=True)
+    for row in range(rows):
+        cols = st.columns(3)
+        for col in range(3):
+            idx = row * 3 + col
+            if idx < num_resumes:
+                resume = resumes[idx]
+                
+                # Extract resume data
+                name = resume.get("name", "Unknown")
+                email = resume.get("email", "")
+                phone = resume.get("contactNo", "")
+                location = resume.get("location", "")
+                
+                # Get experience and skills
+                experience = resume.get("experience", [])
+                skills = resume.get("skills", [])
+                
+                with cols[col]:
+                    html = f"""
+                    <div class="resume-card">
+                        <div class="resume-name">{name}</div>
+                        <div class="resume-location">📍 {location}</div>
+                        <div class="resume-contact">📧 {email}</div>
+                        <div class="resume-contact">📱 {phone}</div>
+                    """
+                    
+                    # Add experience section
+                    if experience:
+                        html += f'<div class="resume-section-title">Experience</div>'
+                        for exp in experience[:3]:  # Limit to 3 experiences
+                            html += f'<div class="resume-experience">• {exp}</div>'
+                    
+                    # Add skills section
+                    if skills:
+                        html += f'<div class="resume-section-title">Skills</div><div>'
+                        for skill in skills[:7]:  # Limit to 7 skills
+                            html += f'<span class="skill-tag">{skill}</span>'
+                        html += '</div>'
+                    
+                    html += '</div>'
+                    st.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
-prompt = ChatPromptTemplate.from_messages(
+
+# Use the prompt that formats resumes in a consistent way for extraction
+agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are a helpful HR assistant. Use the `query_db` tool whenever the "
-            "user asks for candidates or filtering. Otherwise, answer normally.",
+            """You are a helpful HR assistant. Use the `query_db` tool whenever the
+            user asks for candidates or filtering. Otherwise, answer normally.
+            
+            When displaying resume results, always use this exact format for each candidate:
+            
+            1. **Full Name**
+               - **Email:** email@example.com
+               - **Contact No:** contact number
+               - **Location:** location
+               - **Experience:** experience1, experience2, experience3
+               - **Skills:** skill1, skill2, skill3, skill4
+            
+            Maintain this precise format with the exact same headings, as it allows our UI
+            to extract and display the resumes in a grid layout.
+            """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
         MessagesPlaceholder(variable_name="agent_scratchpad"),
     ]
 )
+
 if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferMemory(
         memory_key="chat_history", return_messages=True
     )
 if "agent_executor" not in st.session_state:
-    agent = create_openai_tools_agent(llm, [query_db], prompt)
+    agent = create_openai_tools_agent(llm, [query_db], agent_prompt)
     st.session_state.agent_executor = AgentExecutor(
         agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
 
-# ── STREAMLIT UI ───────────────────────────────────────────────────────
-st.title("🧠 Resume Filtering Chatbot")
+# Track the latest resumes found
+if "last_resumes" not in st.session_state:
+    st.session_state.last_resumes = []
 
-# Add debugging tools
+# ── STREAMLIT UI ───────────────────────────────────────────────────────
+st.set_page_config(page_title="Resume Filtering Chatbot", layout="wide")
+
+# Apply custom CSS
+st.markdown("""
+<style>
+    .stApp {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    .header-container {
+        display: flex;
+        align-items: center;
+        margin-bottom: 20px;
+    }
+    .header-emoji {
+        font-size: 36px;
+        margin-right: 10px;
+    }
+    .header-text {
+        font-size: 24px;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+st.markdown('<div class="header-container"><div class="header-emoji">🧠</div><div class="header-text">Resume Filtering Chatbot</div></div>', unsafe_allow_html=True)
+
+# Sidebar with settings
 with st.sidebar:
-    st.header("Debug Tools")
-    debug_mode = st.checkbox("Show Debug Info", value=True)
+    st.header("Settings")
+    debug_mode = st.checkbox("Debug Mode", value=False)
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
+        st.session_state.last_resumes = []
         st.rerun()
 
 # Handle user input
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
-    # Display user message
+    # Show user message
     st.chat_message("user").write(user_input)
     
     # Process with agent
@@ -257,50 +402,34 @@ if user_input:
         try:
             # Invoke the agent
             response = st.session_state.agent_executor.invoke({"input": user_input})
+            response_text = response["output"]
             
             # Display the assistant's response
-            st.chat_message("assistant").write(response["output"])
+            ai_message = st.chat_message("assistant")
+            ai_message.write(response_text)
             
-            # Debug information
-            if debug_mode:
-                st.subheader("🔍 Debug Information")
+            # Extract resumes from the response
+            extracted_resumes = extract_resumes_from_text(response_text)
+            if extracted_resumes:
+                st.session_state.last_resumes = extracted_resumes
                 
-                # Show the raw response
-                st.markdown("### Raw Response")
+                # Display the resumes in a grid below the conversation
+                st.subheader(f"Resumes Found ({len(extracted_resumes)})")
+                display_resume_grid(extracted_resumes)
+                
+            # Show debug info if enabled
+            if debug_mode:
+                st.subheader("Debug Information")
                 st.json(response)
                 
-                # Try to extract the tool outputs 
-                st.markdown("### Tool Outputs")
-                try:
-                    # Check if there are intermediate steps with tool outputs
-                    if "intermediate_steps" in response:
-                        for i, step in enumerate(response["intermediate_steps"]):
-                            st.markdown(f"#### Step {i+1}")
-                            # Tool call
-                            action = step[0]
-                            st.markdown(f"**Tool:** {action.tool}")
-                            st.markdown(f"**Input:** {action.tool_input}")
-                            
-                            # Tool output
-                            output = step[1]
-                            st.markdown("**Output:**")
-                            st.json(output)
-                            
-                            # If this is query_db and it has results, display them
-                            if action.tool == "query_db" and isinstance(output, dict) and "results" in output:
-                                st.markdown("#### Resume Results")
-                                st.write(f"Found {len(output['results'])} resumes")
-                                
-                                # Display resumes in a simple grid
-                                display_resume_grid(output["results"])
-                    else:
-                        st.write("No tool outputs found in the response")
-                except Exception as e:
-                    st.error(f"Error extracting tool outputs: {str(e)}")
-                    
+                if extracted_resumes:
+                    st.subheader("Extracted Resume Data")
+                    st.json(extracted_resumes)
+                
         except Exception as e:
             st.error(f"Error: {str(e)}")
-            st.exception(e)
+            if debug_mode:
+                st.exception(e)
 else:
     # Display chat history
     for msg in st.session_state.memory.chat_memory.messages:
@@ -308,3 +437,8 @@ else:
             st.chat_message("user").write(msg.content)
         else:
             st.chat_message("assistant").write(msg.content)
+    
+    # If we have resumes from the last query, display them
+    if st.session_state.last_resumes:
+        st.subheader(f"Resumes Found ({len(st.session_state.last_resumes)})")
+        display_resume_grid(st.session_state.last_resumes)

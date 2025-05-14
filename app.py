@@ -709,11 +709,10 @@ with chat_container:
             
             # Display the message
             ai_message = st.chat_message("assistant")
-            
-            # For resume responses, only show the intro text in the chat
             if processed["is_resume_response"]:
+                hidden_meta = json.dumps([{"name": r.get("name"), "resumeId": r.get("resumeId", "")}for r in processed["resumes"]])
                 # Just show the intro text in the chat message
-                ai_message.write(processed["intro_text"])
+                ai_message.write(processed["intro_text"] + f"\n<!--RESUME_META:{hidden_meta}-->")
                 
                 # If there's a conclusion, add it 
                 if processed.get("conclusion_text"):

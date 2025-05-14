@@ -115,7 +115,7 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     return content.get("top_resume_ids", [])
 
 # ── TOOL: query_db ─────────────────────────────────────────────────────
-@tool(description="Filter MongoDB resumes and return the 10 best matches.")
+@tool
 def query_db(
     query: str,
     country: Optional[str] = None,

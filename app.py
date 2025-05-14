@@ -1,9 +1,9 @@
 """
-ZappBot: Resume‑filtering chatbot with optimized display + email sender
+ZappBot: Resume‑filtering chatbot with optimized display + email sender + job match counts
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
-# ⬇︎ only four new imports
+# Email imports
 import smtplib, ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -26,7 +26,7 @@ import openai
 # ── CONFIG ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 
-# ⬇︎ new SMTP constants (use Gmail App‑Password with no spaces)
+# SMTP constants
 SMTP_HOST, SMTP_PORT = "smtp.gmail.com", 465
 SMTP_USER, SMTP_PASS = st.secrets["SMTP_USER"], st.secrets["SMTP_PASS"]
 
@@ -121,7 +121,7 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     content = json.loads(chat.choices[0].message.content)
     return content.get("top_resume_ids", [])
 
-# ── TOOL: query_db  (unchanged logic) ─────────────────────────────────
+# ── TOOL: query_db ─────────────────────────────────────────────────────
 @tool
 def query_db(
     query: str,
@@ -175,7 +175,7 @@ def query_db(
     except Exception as exc:
         return {"error": str(exc)}
 
-# ── TOOL: send_email  (new) ────────────────────────────────────────────
+# ── TOOL: send_email ────────────────────────────────────────────────────
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
     """Send an HTML email using SMTP_USER / SMTP_PASS from secrets.toml."""
@@ -190,6 +190,34 @@ def send_email(to: str, subject: str, body: str) -> str:
         return "Email sent!"
     except Exception as e:
         return f"Email failed: {e}"
+
+# ── NEW TOOL: get_job_match_counts ────────────────────────────────────
+@tool
+def get_job_match_counts(resume_ids: List[str]) -> Dict[str, Any]:
+    """
+    Given a list of resumeIds, return how many unique jobIds each resume is
+    matched to in the resume_matches collection.
+    """
+    try:
+        if not isinstance(resume_ids, list):
+            return {"error": "resume_ids must be a list of strings"}
+        results = []
+        with get_mongo_client() as client:
+            coll = client[DB_NAME]["resume_matches"]
+            for rid in resume_ids:
+                doc = coll.find_one({"resumeId": rid}, {"_id": 0, "matches.jobId": 1})
+                jobs = doc.get("matches", []) if doc else []
+                results.append({"resumeId": rid, "jobsMatched": len(jobs)})
+        return {
+            "message": f"Counts fetched for {len(results)} resumeIds.",
+            "results_count": len(results),
+            "results": results,
+            "completed_at": datetime.utcnow().isoformat(),
+        }
+    except PyMongoError as err:
+        return {"error": f"DB error: {str(err)}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 # ── PARSE AND PROCESS RESPONSE ────────────────────────────────────────
 def process_response(text):
@@ -325,6 +353,21 @@ def display_resume_grid(resumes, container=None):
         font-size: 12px;
         font-weight: 500;
     }
+    .job-matches {
+        margin-top: 8px;
+        padding: 4px 10px;
+        background-color: #E3F2FD;
+        border-radius: 4px;
+        display: inline-block;
+        font-size: 14px;
+        color: #0D47A1;
+    }
+    .resume-id {
+        font-size: 10px;
+        color: #6a737d;
+        margin-top: 8px;
+        word-break: break-all;
+    }
     </style>
     """, unsafe_allow_html=True)
     
@@ -344,10 +387,14 @@ def display_resume_grid(resumes, container=None):
                 email = resume.get("email", "")
                 phone = resume.get("contactNo", "")
                 location = resume.get("location", "")
+                resume_id = resume.get("resumeId", "")  # Extract resumeId for job matching
                 
                 # Get experience and skills
                 experience = resume.get("experience", [])
                 skills = resume.get("skills", [])
+                
+                # Get job matches if available
+                job_matches = resume.get("jobsMatched")
                 
                 with cols[col]:
                     html = f"""
@@ -357,6 +404,14 @@ def display_resume_grid(resumes, container=None):
                         <div class="resume-contact">📧 {email}</div>
                         <div class="resume-contact">📱 {phone}</div>
                     """
+                    
+                    # Add resumeId as data attribute (hidden but accessible)
+                    if resume_id:
+                        html = html.replace('<div class="resume-card">', f'<div class="resume-card" data-resume-id="{resume_id}">')
+                    
+                    # Add job matches if available
+                    if job_matches is not None:
+                        html += f'<div class="job-matches">🔗 Matched to {job_matches} jobs</div>'
                     
                     # Add experience section
                     if experience:
@@ -371,8 +426,12 @@ def display_resume_grid(resumes, container=None):
                             html += f'<span class="skill-tag">{skill}</span>'
                         html += '</div>'
                     
+                    # Show resume ID in debug mode
+                    if debug_mode and resume_id:
+                        html += f'<div class="resume-id">ID: {resume_id}</div>'
+                    
                     html += '</div>'
-                    target.markdown(html, unsafe_allow_html=True)
+                    st.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
@@ -407,6 +466,10 @@ agent_prompt = ChatPromptTemplate.from_messages(
             "These candidates have diverse experiences and skills that may suit your needs."
             
             If the user asks to email or send these results, call the `send_email` tool.
+            
+            If the user wants to check how many jobs a resume is matched to, they need to provide
+            resume IDs in a format like: resumeIds = ["id1", "id2"]. Then use the `get_job_match_counts` tool
+            to find this information.
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -419,15 +482,37 @@ if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferMemory(
         memory_key="chat_history", return_messages=True
     )
+
+# Initialize the agent with all tools
 if "agent_executor" not in st.session_state:
-    agent = create_openai_tools_agent(llm, [query_db, send_email], agent_prompt)  # ← added send_email
+    agent = create_openai_tools_agent(llm, [query_db, send_email, get_job_match_counts], agent_prompt)
     st.session_state.agent_executor = AgentExecutor(
-        agent=agent, tools=[query_db, send_email], memory=st.session_state.memory, verbose=True
+        agent=agent, 
+        tools=[query_db, send_email, get_job_match_counts],
+        memory=st.session_state.memory, 
+        verbose=True
     )
+    st.session_state.agent_upgraded = True
+# Upgrade existing agent if it exists but hasn't been upgraded yet
+elif not st.session_state.get("agent_upgraded", False):
+    upgraded_agent = create_openai_tools_agent(
+        llm, [query_db, send_email, get_job_match_counts], agent_prompt
+    )
+    st.session_state.agent_executor = AgentExecutor(
+        agent=upgraded_agent,
+        tools=[query_db, send_email, get_job_match_counts],
+        memory=st.session_state.memory,
+        verbose=True,
+    )
+    st.session_state.agent_upgraded = True
 
 # Store processed responses for each message to avoid re-processing
 if "processed_responses" not in st.session_state:
     st.session_state.processed_responses = {}
+
+# Store job match data when fetched
+if "job_match_data" not in st.session_state:
+    st.session_state.job_match_data = {}
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
 st.set_page_config(page_title="ZappBot", layout="wide")
@@ -468,6 +553,12 @@ st.markdown("""
         border: none !important;
         box-shadow: none !important;
     }
+    .tool-section {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -482,12 +573,23 @@ with st.sidebar:
     # Email settings section
     st.subheader("Email Settings")
     default_recipient = st.text_input("Default Email Recipient", 
-                                      placeholder="recipient@example.com",
-                                      help="Default email to use when sending resume results")
+                                     placeholder="recipient@example.com",
+                                     help="Default email to use when sending resume results")
+    
+    # Job matching tool section
+    st.subheader("Job Matching")
+    st.markdown("""
+    To check job matches, ask about resumeIds:
+    ```
+    How many jobs are these resumes matched to? 
+    resumeIds = ["id1", "id2"]
+    ```
+    """)
     
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
         st.session_state.processed_responses = {}
+        st.session_state.job_match_data = {}
         st.rerun()
 
 # Main chat container
@@ -499,12 +601,32 @@ if user_input:
     # Process with agent
     with st.spinner("Thinking..."):
         try:
+            # Check if this is a job match query
+            resume_ids_pattern = r'resumeIds\s*=\s*\[(.*?)\]'
+            resume_ids_match = re.search(resume_ids_pattern, user_input)
+            
             # Invoke the agent
             response = st.session_state.agent_executor.invoke({"input": user_input})
             response_text = response["output"]
             
             # Process the response
             processed = process_response(response_text)
+            
+            # Check if this contains job match data
+            if "jobsMatched" in response_text:
+                try:
+                    # Try to extract job match data
+                    matches_pattern = r'"results":\s*(\[.*?\])'
+                    matches_match = re.search(matches_pattern, response_text)
+                    if matches_match:
+                        match_data = json.loads(matches_match.group(1))
+                        # Store job match data
+                        for item in match_data:
+                            resume_id = item.get("resumeId")
+                            if resume_id:
+                                st.session_state.job_match_data[resume_id] = item.get("jobsMatched", 0)
+                except:
+                    pass  # Silently fail if we can't parse the job match data
             
             # Generate a unique key for this message
             timestamp = datetime.now().isoformat()
@@ -583,12 +705,23 @@ with chat_container:
         for i, resp in enumerate(resume_responses):
             with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
                 st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
+                
+                # Add job match data to resumes if available
+                if st.session_state.job_match_data:
+                    for resume in resp['processed']['resumes']:
+                        resume_id = resume.get("resumeId")
+                        if resume_id and resume_id in st.session_state.job_match_data:
+                            resume["jobsMatched"] = st.session_state.job_match_data[resume_id]
+                
+                # Display the resume grid
                 display_resume_grid(resp['processed']['resumes'])
                 
-                # Add email button for this search result
-                if resp['processed']['resumes']:
-                    cols = st.columns([3, 1])
-                    with cols[1]:
+                # Add a row with email button and job match button
+                cols = st.columns([2, 1, 1])
+                
+                # Email button
+                with cols[1]:
+                    if resp['processed']['resumes']:
                         if st.button(f"📧 Email Results", key=f"email_btn_{i}"):
                             try:
                                 # Generate HTML email with resume cards
@@ -607,6 +740,7 @@ with chat_container:
                                     location = resume.get("location", "")
                                     experience = ", ".join(resume.get("experience", []))
                                     skills = ", ".join(resume.get("skills", []))
+                                    job_matches = resume.get("jobsMatched")
                                     
                                     html_body += f"""
                                     <div style="border: 1px solid #e1e4e8; border-radius: 8px; padding: 15px; margin-bottom: 15px;">
@@ -616,6 +750,14 @@ with chat_container:
                                         <p>📱 {phone}</p>
                                         <p><strong>Experience:</strong> {experience}</p>
                                         <p><strong>Skills:</strong> {skills}</p>
+                                    """
+                                    
+                                    if job_matches is not None:
+                                        html_body += f"""
+                                        <p><strong>Job Matches:</strong> {job_matches}</p>
+                                        """
+                                        
+                                    html_body += """
                                     </div>
                                     """
                                 
@@ -640,6 +782,36 @@ with chat_container:
                             except Exception as e:
                                 st.error(f"Failed to send email: {str(e)}")
                 
+                # Job Match button (only shown in debug mode)
+                with cols[2]:
+                    if debug_mode and resp['processed']['resumes']:
+                        if st.button("🔍 Match Jobs", key=f"job_btn_{i}"):
+                            try:
+                                # Extract resume IDs
+                                resume_ids = []
+                                for resume in resp['processed']['resumes']:
+                                    resume_id = resume.get("resumeId")
+                                    if resume_id:
+                                        resume_ids.append(resume_id)
+                                
+                                if resume_ids:
+                                    # Call get_job_match_counts
+                                    result = get_job_match_counts(resume_ids)
+                                    if "results" in result:
+                                        # Store job match data
+                                        for item in result["results"]:
+                                            resume_id = item.get("resumeId")
+                                            if resume_id:
+                                                st.session_state.job_match_data[resume_id] = item.get("jobsMatched", 0)
+                                        st.success(f"Job match data updated for {len(resume_ids)} resumes")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to get job match data")
+                                else:
+                                    st.warning("No resume IDs found")
+                            except Exception as e:
+                                st.error(f"Failed to get job matches: {str(e)}")
+                
                 # Display conclusion if available
                 if resp['processed'].get('conclusion_text'):
                     st.write(resp['processed']['conclusion_text'])
@@ -659,3 +831,6 @@ with chat_container:
                     st.json({key: shorter_value})
                 else:
                     st.json({key: value})
+            
+            st.subheader("Job Match Data")
+            st.json(st.session_state.job_match_data)

@@ -1,5 +1,5 @@
 """
-Resume‑filtering chatbot with optimized grid display
+ZappBot: Resume‑filtering chatbot with complete chat history
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
@@ -177,7 +177,7 @@ def process_response(text):
     3. Remove the resume list from the text to avoid redundancy
     """
     # First, check if this is a resume-listing response
-    if "Here are some" in text and "Experience:" in text and "Skills:" in text:
+    if "Here are some" in text and ("Experience:" in text or "experience:" in text) and ("Skills:" in text or "skills:" in text):
         # Find the introductory text (everything before the first name)
         # Look for pattern of a blank line followed by a name (text with no indentation)
         intro_pattern = r'^(.*?)\n\n([A-Z][a-z]+.*?)\n\nEmail:'
@@ -187,14 +187,20 @@ def process_response(text):
         if intro_match:
             intro_text = intro_match.group(1).strip()
         
-        # Extract the resumes
+        # Extract the resumes - accommodate both formats (numbered and unnumbered)
+        # First try standard format with blank lines
         resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
-        matches = re.findall(resume_pattern, text, re.MULTILINE)
+        matches = re.findall(resume_pattern, text, re.MULTILINE | re.IGNORECASE)
+        
+        # If that didn't work, try the numbered format
+        if not matches:
+            resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
+            matches = re.findall(resume_pattern, text, re.MULTILINE)
         
         # Extract any footer text (after all resumes)
         # This is trickier - look for the last Skills: line and capture everything after it
         last_skills_pattern = r'Skills:\s*([^\n]+)\s*\n\s*(.*?)$'
-        footer_match = re.search(last_skills_pattern, text, re.DOTALL)
+        footer_match = re.search(last_skills_pattern, text, re.DOTALL | re.IGNORECASE)
         
         footer_text = ""
         if footer_match:
@@ -222,7 +228,8 @@ def process_response(text):
             "is_resume_response": True,
             "intro_text": intro_text,
             "resumes": resumes,
-            "footer_text": footer_text
+            "footer_text": footer_text,
+            "full_text": text  # Keep this for complete chat history
         }
     else:
         # Not a resume listing response
@@ -350,7 +357,7 @@ agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            """You are a helpful HR assistant. Use the `query_db` tool whenever the
+            """You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the
             user asks for candidates or filtering. Otherwise, answer normally.
             
             When displaying resume results, always format them consistently as follows:
@@ -390,12 +397,12 @@ if "agent_executor" not in st.session_state:
         agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
 
-# Track the latest processed response
-if "last_processed_response" not in st.session_state:
-    st.session_state.last_processed_response = None
+# Store processed responses for each message to avoid re-processing
+if "processed_responses" not in st.session_state:
+    st.session_state.processed_responses = {}
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
-st.set_page_config(page_title="Resume Filtering Chatbot", layout="wide")
+st.set_page_config(page_title="ZappBot", layout="wide")
 
 # Apply custom CSS
 st.markdown("""
@@ -421,7 +428,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Header
-st.markdown('<div class="header-container"><div class="header-emoji">🧠</div><div class="header-text">Resume Filtering Chatbot</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="header-container"><div class="header-emoji">⚡</div><div class="header-text">ZappBot</div></div>', unsafe_allow_html=True)
 
 # Sidebar with settings
 with st.sidebar:
@@ -429,15 +436,18 @@ with st.sidebar:
     debug_mode = st.checkbox("Debug Mode", value=False)
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
-        st.session_state.last_processed_response = None
+        st.session_state.processed_responses = {}
         st.rerun()
+
+# Main chat container
+chat_container = st.container()
+
+# Resume results container
+resume_container = st.container()
 
 # Handle user input
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
-    # Show user message
-    st.chat_message("user").write(user_input)
-    
     # Process with agent
     with st.spinner("Thinking..."):
         try:
@@ -447,61 +457,61 @@ if user_input:
             
             # Process the response
             processed = process_response(response_text)
-            st.session_state.last_processed_response = processed
             
-            # Display the response appropriately
-            ai_message = st.chat_message("assistant")
+            # Store the processed response with a unique key
+            message_key = f"user_{datetime.now().isoformat()}"
+            st.session_state.processed_responses[message_key] = processed
             
-            if processed["is_resume_response"]:
-                # Only show introductory text, not the full resume listing
-                ai_message.write(processed["intro_text"])
-                
-                # Show the resumes in a grid
-                if processed["resumes"]:
-                    st.subheader(f"Resumes Found ({len(processed['resumes'])})")
-                    display_resume_grid(processed["resumes"])
-                
-                # Show footer text if it exists
-                if processed["footer_text"]:
-                    st.write(processed["footer_text"])
-            else:
-                # For non-resume responses, show the full text
-                ai_message.write(processed["full_text"])
+            # Force a refresh to show the new messages
+            st.rerun()
             
-            # Show debug info if enabled
-            if debug_mode:
-                st.subheader("Debug Information")
-                st.json(response)
-                
-                if processed["is_resume_response"]:
-                    st.subheader("Processed Resume Data")
-                    st.json(processed)
-                
         except Exception as e:
             st.error(f"Error: {str(e)}")
             if debug_mode:
                 st.exception(e)
-else:
-    # Display chat history
-    for msg in st.session_state.memory.chat_memory.messages:
+
+# Display the complete chat history
+with chat_container:
+    # Display all messages
+    for i, msg in enumerate(st.session_state.memory.chat_memory.messages):
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
         else:
-            # Process and display message
-            processed = process_response(msg.content)
+            # Get or process the AI message
+            msg_key = f"ai_{i}"
+            if msg_key not in st.session_state.processed_responses:
+                st.session_state.processed_responses[msg_key] = process_response(msg.content)
             
+            processed = st.session_state.processed_responses[msg_key]
+            
+            # Display the message
+            ai_message = st.chat_message("assistant")
+            
+            # For resume responses, show intro text in the message
             if processed["is_resume_response"]:
-                # Only show intro for resume responses in history
-                st.chat_message("assistant").write(processed["intro_text"])
+                # Just show the intro text in the chat message
+                ai_message.write(processed["intro_text"])
+                
+                # After displaying the message, if this is a resume response,
+                # store the resumes for display in the resume container
+                with resume_container:
+                    if i == len(st.session_state.memory.chat_memory.messages) - 1:  # If this is the latest message
+                        if processed["resumes"]:
+                            st.subheader(f"Resumes Found ({len(processed['resumes'])})")
+                            display_resume_grid(processed["resumes"])
+                        
+                        # Show footer text if it exists
+                        if processed["footer_text"]:
+                            st.write(processed["footer_text"])
             else:
-                # Show full text for non-resume responses
-                st.chat_message("assistant").write(processed["full_text"])
+                # For non-resume responses, show the full text
+                ai_message.write(processed["full_text"])
     
-    # If we have a processed response with resumes, display them
-    if st.session_state.last_processed_response and st.session_state.last_processed_response["is_resume_response"]:
-        st.subheader(f"Resumes Found ({len(st.session_state.last_processed_response['resumes'])})")
-        display_resume_grid(st.session_state.last_processed_response["resumes"])
-        
-        # Show footer text if it exists
-        if st.session_state.last_processed_response["footer_text"]:
-            st.write(st.session_state.last_processed_response["footer_text"])
+    # Show debug info if enabled
+    if debug_mode:
+        with st.expander("Debug Information"):
+            st.subheader("Memory Contents")
+            st.json({i: msg.content for i, msg in enumerate(st.session_state.memory.chat_memory.messages)})
+            
+            st.subheader("Processed Responses")
+            st.json({k: v for k, v in st.session_state.processed_responses.items()})

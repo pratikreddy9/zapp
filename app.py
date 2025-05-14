@@ -121,7 +121,7 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     content = json.loads(chat.choices[0].message.content)
     return content.get("top_resume_ids", [])
 
-# ── TOOL: query_db ─────────────────────────────────────────────────────
+# ── TOOLS ─────────────────────────────────────────────────────────────
 @tool
 def query_db(
     query: str,
@@ -175,7 +175,6 @@ def query_db(
     except Exception as exc:
         return {"error": str(exc)}
 
-# ── TOOL: send_email ────────────────────────────────────────────────────
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
     """Send an HTML email using SMTP_USER / SMTP_PASS from secrets.toml."""
@@ -191,7 +190,6 @@ def send_email(to: str, subject: str, body: str) -> str:
     except Exception as e:
         return f"Email failed: {e}"
 
-# ── NEW TOOL: get_job_match_counts ────────────────────────────────────
 @tool
 def get_job_match_counts(resume_ids: List[str]) -> Dict[str, Any]:
     """
@@ -219,7 +217,71 @@ def get_job_match_counts(resume_ids: List[str]) -> Dict[str, Any]:
     except Exception as exc:
         return {"error": str(exc)}
 
+@tool
+def get_resume_id_by_name(name: str) -> Dict[str, Any]:
+    """
+    Given a candidate name, return their resumeId if it exists in our records.
+    """
+    try:
+        if "resume_ids" not in st.session_state:
+            return {"error": "No resume IDs are stored in the current session."}
+        
+        # Normalize name by lowercasing and removing extra spaces
+        name_norm = ' '.join(name.lower().split())
+        
+        # Try exact match first
+        if name_norm in [k.lower() for k in st.session_state.resume_ids.keys()]:
+            for k, v in st.session_state.resume_ids.items():
+                if k.lower() == name_norm:
+                    return {
+                        "found": True, 
+                        "name": k, 
+                        "resumeId": v
+                    }
+        
+        # Try partial match
+        for k, v in st.session_state.resume_ids.items():
+            if name_norm in k.lower():
+                return {
+                    "found": True, 
+                    "name": k, 
+                    "resumeId": v
+                }
+        
+        # If no match found in session state, try database lookup
+        with get_mongo_client() as client:
+            coll = client[DB_NAME][COLL_NAME]
+            # Try to find by name
+            query = {"$or": [
+                {"name": {"$regex": name, "$options": "i"}},
+                {"fullName": {"$regex": name, "$options": "i"}}
+            ]}
+            doc = coll.find_one(query, {"_id": 0, "resumeId": 1, "name": 1, "fullName": 1})
+            if doc and doc.get("resumeId"):
+                display_name = doc.get("name") or doc.get("fullName") or name
+                return {
+                    "found": True,
+                    "name": display_name,
+                    "resumeId": doc["resumeId"]
+                }
+        
+        return {"found": False, "message": f"No resumeId found for '{name}'"}
+    except Exception as e:
+        return {"error": str(e)}
+
 # ── PARSE AND PROCESS RESPONSE ────────────────────────────────────────
+def extract_resume_ids_from_response(response_text):
+    """Extract resumeIds from the HTML comment in the response."""
+    meta_pattern = r'<!--RESUME_META:(.*?)-->'
+    meta_match = re.search(meta_pattern, response_text)
+    if meta_match:
+        try:
+            meta_data = json.loads(meta_match.group(1))
+            return {item.get("name"): item.get("resumeId") for item in meta_data if item.get("resumeId")}
+        except:
+            return {}
+    return {}
+
 def process_response(text):
     """
     Process the response text to:
@@ -313,7 +375,6 @@ def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
                 )
                 if doc and doc.get("resumeId"):
                     res["resumeId"] = doc["resumeId"]
-
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
 def display_resume_grid(resumes, container=None):
@@ -462,7 +523,7 @@ def display_resume_grid(resumes, container=None):
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
 
-# Use the prompt that formats resumes in a consistent way for extraction
+# Updated prompt that instructs the agent to use resumeIds properly
 agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -470,6 +531,7 @@ agent_prompt = ChatPromptTemplate.from_messages(
             """You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the
             user asks for candidates or filtering. Otherwise, answer normally.
             
+            # Resume Formatting
             When displaying resume results, always format them consistently as follows:
             
             First, provide a brief introduction line like:
@@ -491,11 +553,16 @@ agent_prompt = ChatPromptTemplate.from_messages(
             After listing all candidates, include a brief concluding sentence like:
             "These candidates have diverse experiences and skills that may suit your needs."
             
+            # ResumeIDs
+            When a user asks about a specific candidate by name, use the `get_resume_id_by_name` tool
+            to look up their resumeId. Then use this resumeId with the `get_job_match_counts` tool
+            to find how many jobs they are matched to.
+            
+            # Email and Job Matches
             If the user asks to email or send these results, call the `send_email` tool.
             
-            If the user wants to check how many jobs a resume is matched to, they need to provide
-            resume IDs in a format like: resumeIds = ["id1", "id2"]. Then use the `get_job_match_counts` tool
-            to find this information.
+            If the user wants to check how many jobs a resume is matched to, use the `get_job_match_counts` tool
+            with the appropriate resumeIds.
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -504,41 +571,41 @@ agent_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+# Initialize session state variables
 if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferMemory(
         memory_key="chat_history", return_messages=True
     )
 
-# Initialize the agent with all tools
+if "resume_ids" not in st.session_state:
+    st.session_state.resume_ids = {}
+
+if "processed_responses" not in st.session_state:
+    st.session_state.processed_responses = {}
+
+if "job_match_data" not in st.session_state:
+    st.session_state.job_match_data = {}
+
+# Initialize or upgrade the agent
+tools = [query_db, send_email, get_job_match_counts, get_resume_id_by_name]
 if "agent_executor" not in st.session_state:
-    agent = create_openai_tools_agent(llm, [query_db, send_email, get_job_match_counts], agent_prompt)
+    agent = create_openai_tools_agent(llm, tools, agent_prompt)
     st.session_state.agent_executor = AgentExecutor(
         agent=agent, 
-        tools=[query_db, send_email, get_job_match_counts],
+        tools=tools,
         memory=st.session_state.memory, 
         verbose=True
     )
     st.session_state.agent_upgraded = True
-# Upgrade existing agent if it exists but hasn't been upgraded yet
 elif not st.session_state.get("agent_upgraded", False):
-    upgraded_agent = create_openai_tools_agent(
-        llm, [query_db, send_email, get_job_match_counts], agent_prompt
-    )
+    upgraded_agent = create_openai_tools_agent(llm, tools, agent_prompt)
     st.session_state.agent_executor = AgentExecutor(
         agent=upgraded_agent,
-        tools=[query_db, send_email, get_job_match_counts],
+        tools=tools,
         memory=st.session_state.memory,
         verbose=True,
     )
     st.session_state.agent_upgraded = True
-
-# Store processed responses for each message to avoid re-processing
-if "processed_responses" not in st.session_state:
-    st.session_state.processed_responses = {}
-
-# Store job match data when fetched
-if "job_match_data" not in st.session_state:
-    st.session_state.job_match_data = {}
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
 st.set_page_config(page_title="ZappBot", layout="wide")
@@ -605,10 +672,9 @@ with st.sidebar:
     # Job matching tool section
     st.subheader("Job Matching")
     st.markdown("""
-    To check job matches, ask about resumeIds:
+    To check job matches, ask about a specific candidate:
     ```
-    How many jobs are these resumes matched to? 
-    resumeIds = ["id1", "id2"]
+    How many jobs is [Candidate Name] matched to?
     ```
     """)
     
@@ -616,6 +682,7 @@ with st.sidebar:
         st.session_state.memory.clear()
         st.session_state.processed_responses = {}
         st.session_state.job_match_data = {}
+        st.session_state.resume_ids = {}
         st.rerun()
 
 # Main chat container
@@ -627,13 +694,14 @@ if user_input:
     # Process with agent
     with st.spinner("Thinking..."):
         try:
-            # Check if this is a job match query
-            resume_ids_pattern = r'resumeIds\s*=\s*\[(.*?)\]'
-            resume_ids_match = re.search(resume_ids_pattern, user_input)
-            
             # Invoke the agent
             response = st.session_state.agent_executor.invoke({"input": user_input})
             response_text = response["output"]
+            
+            # Extract and store resumeIds from the response
+            resume_ids = extract_resume_ids_from_response(response_text)
+            if resume_ids:
+                st.session_state.resume_ids.update(resume_ids)
             
             # Process the response
             processed = process_response(response_text)
@@ -666,6 +734,7 @@ if user_input:
             st.error(f"Error: {str(e)}")
             if debug_mode:
                 st.exception(e)
+
 
 # Display the complete chat history
 with chat_container:
@@ -710,6 +779,11 @@ with chat_container:
             # Display the message
             ai_message = st.chat_message("assistant")
             if processed["is_resume_response"]:
+                # Extract and store resumeIds if they are in the message
+                resume_ids = extract_resume_ids_from_response(processed["full_text"])
+                if resume_ids:
+                    st.session_state.resume_ids.update(resume_ids)
+                
                 hidden_meta = json.dumps([{"name": r.get("name"), "resumeId": r.get("resumeId", "")}for r in processed["resumes"]])
                 # Just show the intro text in the chat message
                 ai_message.write(processed["intro_text"] + f"\n<!--RESUME_META:{hidden_meta}-->")
@@ -731,8 +805,14 @@ with chat_container:
             with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
                 st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
                 
+                # Make sure resumes have resumeIds
                 attach_hidden_resume_ids(resp['processed']['resumes'])
-            
+                
+                # Store resumeIds in session state
+                for resume in resp['processed']['resumes']:
+                    if resume.get("resumeId") and resume.get("name"):
+                        st.session_state.resume_ids[resume["name"]] = resume["resumeId"]
+                
                 # Add job match data to resumes if available
                 if st.session_state.job_match_data:
                     for resume in resp['processed']['resumes']:
@@ -809,9 +889,9 @@ with chat_container:
                             except Exception as e:
                                 st.error(f"Failed to send email: {str(e)}")
                 
-                # Job Match button (only shown in debug mode)
+                # Job Match button
                 with cols[2]:
-                    if debug_mode and resp['processed']['resumes']:
+                    if resp['processed']['resumes']:
                         if st.button("🔍 Match Jobs", key=f"job_btn_{i}"):
                             try:
                                 # Extract resume IDs
@@ -823,7 +903,7 @@ with chat_container:
                                 
                                 if resume_ids:
                                     # Call get_job_match_counts
-                                    result = get_job_match_counts.invoke(resume_ids)
+                                    result = get_job_match_counts(resume_ids)
                                     if "results" in result:
                                         # Store job match data
                                         for item in result["results"]:
@@ -848,6 +928,9 @@ with chat_container:
         with st.expander("Debug Information"):
             st.subheader("Memory Contents")
             st.json({i: msg.content for i, msg in enumerate(st.session_state.memory.chat_memory.messages)})
+            
+            st.subheader("Stored Resume IDs")
+            st.json(st.session_state.resume_ids)
             
             st.subheader("Processed Responses")
             for key, value in st.session_state.processed_responses.items():

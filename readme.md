@@ -4,3 +4,4 @@ app3 is better ui wis but the agent forgets how to use the tool call as the chat
 
 app4.py is working well i am abl to asl a question it fetched the resumes then i asked for numbers it gave then i asked what about vietnam then i asked all phone numbers it gave .
 
+app5 is working sending emails and i asked any point of convo to send mail it worked .

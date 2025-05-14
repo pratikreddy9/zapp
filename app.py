@@ -1,5 +1,5 @@
 """
-ZappBot: Resume filtering chatbot with enhanced UI and reliable behavior
+ZappBot: Resume‑filtering chatbot with reliable agent and enhanced UI
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
@@ -174,28 +174,80 @@ def process_response(text):
     Process the response text to:
     1. Extract any introductory text
     2. Extract resume data
-    3. Determine conclusion text
+    3. Remove the resume list from the text to avoid redundancy
     """
     # First, check if this is a resume-listing response
-    if "Here are some" in text and ("Experience:" in text or "experience:" in text) and ("Skills:" in text or "skills:" in text):
+    if "Here are some" in text and ("Experience:" in text or "experience:" in text or "Email:" in text or "Contact" in text):
         # Find the introductory text (everything before the first name)
         # Look for pattern of a blank line followed by a name (text with no indentation)
-        intro_pattern = r'^(.*?)\n\n([A-Z][a-z]+.*?)\n\nEmail:'
+        intro_pattern = r'^(.*?)\n\s*(\d+\.\s+\*\*|\n[A-Z][a-z]+)'
         intro_match = re.search(intro_pattern, text, re.DOTALL)
         
         intro_text = ""
         if intro_match:
             intro_text = intro_match.group(1).strip()
         
-        # Extract the resumes - accommodate both formats (numbered and unnumbered)
-        # First try standard format with blank lines
-        resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
-        matches = re.findall(resume_pattern, text, re.MULTILINE | re.IGNORECASE)
+        # Extract the resumes - try multiple patterns
+        resumes = []
         
-        # If that didn't work, try the numbered format
-        if not matches:
-            resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
-            matches = re.findall(resume_pattern, text, re.MULTILINE)
+        # Pattern 1: Numbered list with bold names
+        pattern1 = r'\d+\.\s+\*\*([^*]+)\*\*\s*(?:\n\s*\*)?([^*]*)'
+        matches1 = re.findall(pattern1, text, re.MULTILINE)
+        
+        if matches1:
+            for match in matches1:
+                name, details = match
+                name = name.strip()
+                
+                # Extract email, contact, location, experience, skills from details
+                email_match = re.search(r'Email:\s*([^\n]*)', details)
+                contact_match = re.search(r'Contact:\s*([^\n]*)', details)
+                location_match = re.search(r'Location:\s*([^\n]*)', details)
+                experience_match = re.search(r'Experience:\s*([^\n]*)', details)
+                skills_match = re.search(r'Skills:\s*([^\n]*)', details)
+                
+                email = email_match.group(1).strip() if email_match else ""
+                contact = contact_match.group(1).strip() if contact_match else ""
+                location = location_match.group(1).strip() if location_match else ""
+                
+                # Handle experience and skills
+                experience = []
+                if experience_match:
+                    experience = [e.strip() for e in experience_match.group(1).split(',')]
+                
+                skills = []
+                if skills_match:
+                    skills = [s.strip() for s in skills_match.group(1).split(',')]
+                
+                resumes.append({
+                    "name": name,
+                    "email": email,
+                    "contactNo": contact,
+                    "location": location,
+                    "experience": experience,
+                    "skills": skills
+                })
+        
+        # Pattern 2: Standard format with blank lines
+        if not resumes:
+            pattern2 = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
+            matches2 = re.findall(pattern2, text, re.MULTILINE | re.IGNORECASE)
+            
+            for match in matches2:
+                name, email, contact, location, experience, skills = match
+                
+                # Split skills and experience
+                skill_list = [s.strip() for s in skills.split(',')]
+                exp_list = [e.strip() for e in experience.split(',')]
+                
+                resumes.append({
+                    "name": name.strip(),
+                    "email": email.strip(),
+                    "contactNo": contact.strip(),
+                    "location": location.strip(),
+                    "experience": exp_list,
+                    "skills": skill_list
+                })
         
         # Extract the conclusion (after all resumes)
         # Look for lines that contain phrases like "These candidates" or similar conclusion statements
@@ -206,30 +258,12 @@ def process_response(text):
         if conclusion_match:
             conclusion_text = conclusion_match.group(1).strip()
         
-        # Convert resume matches to structured data
-        resumes = []
-        for match in matches:
-            name, email, contact, location, experience, skills = match
-            
-            # Split skills and experience
-            skill_list = [s.strip() for s in skills.split(',')]
-            exp_list = [e.strip() for e in experience.split(',')]
-            
-            resumes.append({
-                "name": name.strip(),
-                "email": email.strip(),
-                "contactNo": contact.strip(),
-                "location": location.strip(),
-                "experience": exp_list,
-                "skills": skill_list
-            })
-        
         return {
             "is_resume_response": True,
             "intro_text": intro_text,
             "resumes": resumes,
             "conclusion_text": conclusion_text,
-            "full_text": text  # Keep this for debugging
+            "full_text": text  # Keep this for debug purposes
         }
     else:
         # Not a resume listing response
@@ -352,9 +386,10 @@ def display_resume_grid(resumes, container=None):
                     target.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
+# Use the working agent code
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
 
-# Use the original, simple prompt that worked reliably
+# Use the simple prompt that works reliably
 prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -372,16 +407,15 @@ if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferMemory(
         memory_key="chat_history", return_messages=True
     )
-
 if "agent_executor" not in st.session_state:
     agent = create_openai_tools_agent(llm, [query_db], prompt)
     st.session_state.agent_executor = AgentExecutor(
         agent=agent, tools=[query_db], memory=st.session_state.memory, verbose=True
     )
 
-# Store resume responses for UI display
-if "resume_responses" not in st.session_state:
-    st.session_state.resume_responses = []
+# Store processed responses for each message to avoid re-processing
+if "processed_responses" not in st.session_state:
+    st.session_state.processed_responses = {}
 
 # ── STREAMLIT UI ───────────────────────────────────────────────────────
 st.set_page_config(page_title="ZappBot", layout="wide")
@@ -434,107 +468,105 @@ with st.sidebar:
     debug_mode = st.checkbox("Debug Mode", value=False)
     if st.button("Clear Chat History"):
         st.session_state.memory.clear()
-        st.session_state.resume_responses = []
+        st.session_state.processed_responses = {}
         st.rerun()
 
 # Main chat container
 chat_container = st.container()
 
-# Handle user input
+# Resume results container
+resume_container = st.container()
+
+# Handle user input - use the code from the working agent implementation
 user_input = st.chat_input("Ask me to find resumes...")
 if user_input:
-    # Show user message
-    st.chat_message("user").write(user_input)
-    
-    # Process with agent - use the original method that works reliably
+    # Process with the working agent implementation
     with st.spinner("Thinking..."):
-        try:
-            # This is the key part - invoke the agent with the simple approach that works well
-            response = st.session_state.agent_executor.invoke({"input": user_input})
-            assistant_response = response["output"]
-            
-            # Display the assistant's message
-            st.chat_message("assistant").write(assistant_response)
-            
-            # Process the response to extract resume data
-            processed = process_response(assistant_response)
-            
-            # If this is a resume response, store it for the UI display
-            if processed["is_resume_response"]:
-                # Store the user query and processed response
-                st.session_state.resume_responses.append({
-                    "query": user_input,
-                    "intro": processed["intro_text"],
-                    "resumes": processed["resumes"],
-                    "conclusion": processed.get("conclusion_text", ""),
-                    "timestamp": datetime.now().isoformat()
-                })
-            
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            if debug_mode:
-                st.exception(e)
-else:
-    # Display chat history
-    for msg in st.session_state.memory.chat_memory.messages:
+        # Just as in the working version
+        st.session_state.agent_executor.invoke({"input": user_input})
+        # Force a refresh
+        st.rerun()
+
+# Display the complete chat history with UI from the working UI version
+with chat_container:
+    # Create a list to store all resume responses for display in the order they appear
+    resume_responses = []
+    
+    # Display all messages
+    for i, msg in enumerate(st.session_state.memory.chat_memory.messages):
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
-        else:
-            # First, display the complete message text as is
-            st.chat_message("assistant").write(msg.content)
             
-            # Check if this message contains resume data, and if we don't already have it stored
-            processed = process_response(msg.content)
+            # Store the user query for context if the next message is a resume response
+            if i+1 < len(st.session_state.memory.chat_memory.messages):
+                next_msg = st.session_state.memory.chat_memory.messages[i+1]
+                if next_msg.type == "ai":
+                    # Generate a key for the AI message
+                    ai_msg_key = f"ai_{i+1}"
+                    
+                    # Ensure the message is processed
+                    if ai_msg_key not in st.session_state.processed_responses:
+                        st.session_state.processed_responses[ai_msg_key] = process_response(next_msg.content)
+                    
+                    # Get the processed message
+                    processed_ai = st.session_state.processed_responses[ai_msg_key]
+                    
+                    # If this is a resume response, store it for later display
+                    if processed_ai["is_resume_response"]:
+                        resume_responses.append({
+                            "query": msg.content,
+                            "processed": processed_ai,
+                            "index": i+1
+                        })
+                        
+        else:  # AI message
+            # Get or process the AI message
+            msg_key = f"ai_{i}"
+            if msg_key not in st.session_state.processed_responses:
+                st.session_state.processed_responses[msg_key] = process_response(msg.content)
+            
+            processed = st.session_state.processed_responses[msg_key]
+            
+            # Display the message
+            ai_message = st.chat_message("assistant")
+            
+            # For resume responses, only show the intro text in the chat
             if processed["is_resume_response"]:
-                # Find the corresponding user query if possible
-                user_query = "Resume Search"
-                idx = st.session_state.memory.chat_memory.messages.index(msg)
-                if idx > 0 and st.session_state.memory.chat_memory.messages[idx-1].type == "human":
-                    user_query = st.session_state.memory.chat_memory.messages[idx-1].content
+                # Just show the intro text in the chat message
+                ai_message.write(processed["intro_text"])
                 
-                # Check if we already have this response stored
-                found = False
-                for resp in st.session_state.resume_responses:
-                    if resp["query"] == user_query:
-                        found = True
-                        break
-                
-                # If not found, add it
-                if not found:
-                    st.session_state.resume_responses.append({
-                        "query": user_query,
-                        "intro": processed["intro_text"],
-                        "resumes": processed["resumes"],
-                        "conclusion": processed.get("conclusion_text", ""),
-                        "timestamp": datetime.now().isoformat()
-                    })
-
-# Display all resume search results in the separate section
-if st.session_state.resume_responses:
-    st.markdown("---")
-    st.subheader("Resume Search Results")
+                # If there's a conclusion, add it 
+                if processed.get("conclusion_text"):
+                    ai_message.write(processed["conclusion_text"])
+            else:
+                # For non-resume responses, show the full text
+                ai_message.write(processed["full_text"])
     
-    # Create an expander for each resume search
-    for i, resp in enumerate(st.session_state.resume_responses):
-        with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(st.session_state.resume_responses)-1)):
-            st.markdown(f"<div class='resume-query'>{resp['intro']}</div>", unsafe_allow_html=True)
-            display_resume_grid(resp['resumes'])
-            if resp['conclusion']:
-                st.write(resp['conclusion'])
-
-# Show debug info if enabled
-if debug_mode:
-    with st.expander("Debug Information"):
-        st.subheader("Memory Contents")
-        st.json({i: msg.content for i, msg in enumerate(st.session_state.memory.chat_memory.messages)})
+    # Display all resume grids after the chat
+    if resume_responses:
+        st.markdown("---")
+        st.subheader("Resume Search Results")
         
-        st.subheader("Resume Responses")
-        display_data = []
-        for i, resp in enumerate(st.session_state.resume_responses):
-            display_data.append({
-                "index": i,
-                "query": resp["query"],
-                "timestamp": resp["timestamp"],
-                "resume_count": len(resp["resumes"])
-            })
-        st.json(display_data)
+        # Create an expander for each resume search
+        for i, resp in enumerate(resume_responses):
+            with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
+                st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
+                display_resume_grid(resp['processed']['resumes'])
+                if resp['processed'].get('conclusion_text'):
+                    st.write(resp['processed']['conclusion_text'])
+    
+    # Show debug info if enabled
+    if debug_mode:
+        with st.expander("Debug Information"):
+            st.subheader("Memory Contents")
+            st.json({i: msg.content for i, msg in enumerate(st.session_state.memory.chat_memory.messages)})
+            
+            st.subheader("Processed Responses")
+            for key, value in st.session_state.processed_responses.items():
+                if "full_text" in value:
+                    # Create a shorter version for display
+                    shorter_value = {k: v for k, v in value.items() if k != "full_text"}
+                    shorter_value["full_text_length"] = len(value["full_text"])
+                    st.json({key: shorter_value})
+                else:
+                    st.json({key: value})

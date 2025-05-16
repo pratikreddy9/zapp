@@ -21,7 +21,7 @@ DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL_NAME = "gpt-4o"
-TOP_K_DEFAULT = 50
+TOP_K_DEFAULT = 20
 
 # Connect to MongoDB
 def get_mongo_client() -> MongoClient:
@@ -73,7 +73,7 @@ def score_candidates_with_langchain(query: str, candidates: List[Dict[str, Any]]
         # Create prompt template
         template = """
         You are a sophisticated HR matching system. Your task is to identify the best candidates 
-        for a job based on the given query.
+        for a job based on the given query. Be extremely strict and precise with your matching.
         
         QUERY: {query}
         
@@ -81,13 +81,24 @@ def score_candidates_with_langchain(query: str, candidates: List[Dict[str, Any]]
         {candidates}
         
         Analyze each candidate's profile and evaluate how well they match the query. 
-        Consider these factors:
-        1. Job titles matching the requirements
-        2. Relevant skills and keywords
-        3. Experience level
-        4. Location if specified
+        Follow these requirements STRICTLY - candidates must satisfy ALL of these criteria:
         
-        Select the top {top_k} candidates that best match the query.
+        1. Exact Job Title Match: The candidate MUST have held a job title of "software developer" or extremely close variants 
+           like "software engineer", "back-end developer", etc. Having skills in development is NOT enough - they must have 
+           actually worked in a developer role.
+        
+        2. Experience Level: The candidate MUST have the minimum years of experience specifically as a developer as required
+           in the query. Experience in other roles doesn't count toward this requirement.
+        
+        3. Required Skills: The candidate MUST have ALL the specific skills mentioned in the query (like SQL and Python).
+        
+        4. Location: The candidate MUST be in the location specified in the query.
+        
+        Do NOT select candidates who fail to meet ANY of these criteria. It's better to return fewer candidates that truly 
+        match than to include candidates who don't meet all requirements.
+        
+        Select the top {top_k} candidates that best match ALL criteria. If fewer than {top_k} candidates match ALL criteria, 
+        only return those that do.
         
         {format_instructions}
         """

@@ -148,7 +148,7 @@ def expand(values: List[str], table: Dict[str, List[str]]) -> List[str]:
 # ── LLM‑BASED RESUME SCORER ────────────────────────────────────────────
 _openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 EVALUATOR_PROMPT = """
-You are a resume scoring assistant. Return only the 10 best resumeIds.
+You are a resume scoring assistant. Return only the 10 best resumeIds. with all the matching according to the query.
 
 JSON format:
 {

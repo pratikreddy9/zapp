@@ -69,51 +69,10 @@ def reformat_email_body(llm_output, intro="", conclusion=""):
     # Handle list of dicts (resumes, counts, etc)
     if isinstance(llm_output, list) and llm_output and isinstance(llm_output[0], dict):
         for i, item in enumerate(llm_output, 1):
-            lines.append(f"Candidate {i}")
-            lines.append("-" * 40)
-            # Format name with emphasis
-            name = item.get("name", "Unknown")
-            lines.append(f"{name}")
-            lines.append("")
-            
-            # Basic information
-            email = item.get("email", "N/A")
-            phone = item.get("contactNo", "N/A")
-            location = item.get("location", "N/A")
-            lines.append(f"Email:       {email}")
-            lines.append(f"Contact No:  {phone}")
-            lines.append(f"Location:    {location}")
-            
-            # Experience
-            experience = item.get("experience", [])
-            if experience:
-                lines.append("\nExperience:")
-                for exp in experience:
-                    lines.append(f"- {exp}")
-            
-            # Skills
-            skills = item.get("skills", [])
-            if skills:
-                lines.append("\nSkills:")
-                skill_text = ", ".join(str(s) for s in skills)
-                lines.append(skill_text)
-            
-            # Keywords
-            keywords = item.get("keywords", [])
-            if keywords:
-                lines.append("\nKeywords:")
-                keyword_text = ", ".join(str(k) for k in keywords)
-                lines.append(keyword_text)
-            
-            # Jobs matched
-            job_matches = item.get("jobsMatched")
-            if job_matches is not None:
-                lines.append(f"\nMatched to {job_matches} jobs")
-                
-            # Resume ID in debug mode
-            if debug_mode and item.get("resumeId"):
-                lines.append(f"\nID: {item.get('resumeId')}")
-                
+            lines.append(f"Item {i}")
+            lines.append("-" * 30)
+            for k, v in item.items():
+                lines.append(f"{k.capitalize():<15}: {v}")
             lines.append("")
     # Handle dict (summary data)
     elif isinstance(llm_output, dict):
@@ -154,11 +113,18 @@ COUNTRY_EQUIV = {
     "united arab emirates": ["united arab emirates", "uae"],
 }
 SKILL_VARIANTS = {
+    "sql": ["sql", "mysql", "microsoft sql server"],
     "javascript": ["javascript", "js", "java script"],
     "c#": ["c#", "c sharp", "csharp"],
     "html": ["html", "hypertext markup language"],
 }
 TITLE_VARIANTS = {
+    "software developer": [
+        "software developer",
+        "software dev",
+        "softwaredeveloper",
+        "software engineer",
+    ],
     "backend developer": [
         "backend developer",
         "backend dev",
@@ -216,61 +182,35 @@ def query_db(
     """Filter MongoDB resumes and return top 10 matches."""
     try:
         mongo_q: Dict[str, Any] = {}
-        and_clauses = []
-        
-        # Country filter
         if country:
             mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
-        
-        # Skills filter - use $all to ensure candidates have ALL requested skills
         if skills:
             expanded = expand(skills, SKILL_VARIANTS)
-            
-            # Modified to use $all instead of $in for strict matching
-            skills_clause = {
-                "$or": [
-                    {"skills.skillName": {"$all": expanded}},
-                    {"keywords": {"$all": expanded}}
-                ]
-            }
-            and_clauses.append(skills_clause)
-        
-        # Job titles filter with $elemMatch for proper array element matching
+            mongo_q["$or"] = [
+                {"skills.skillName": {"$in": expanded}},
+                {"keywords": {"$in": expanded}},
+            ]
+        and_clauses = []
         if job_titles:
-            expanded_titles = expand(job_titles, TITLE_VARIANTS)
-            and_clauses.append({"jobExperiences": {"$elemMatch": {"title": {"$in": expanded_titles}}}})
-        
-        # Experience years filter - modified to handle decimal values
+            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
         if isinstance(min_experience_years, int) and min_experience_years > 0:
             and_clauses.append(
                 {
                     "$expr": {
                         "$gte": [
-                            {
-                                "$toDouble": {
-                                    "$ifNull": [
-                                        {"$first": "$jobExperiences.duration"}, 
-                                        "0"
-                                    ]
-                                }
-                            },
+                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
                             min_experience_years,
                         ]
                     }
                 }
             )
-        
-        # Combine all AND clauses
         if and_clauses:
             mongo_q["$and"] = and_clauses
-            
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
             candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
-            
         best_ids = score_resumes(query, candidates)
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
-        
         return {
             "message": f"{len(best_resumes)} resumes after scoring.",
             "results_count": len(best_resumes),
@@ -377,45 +317,6 @@ def get_resume_id_by_name(name: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-# ── EXTRACT SEARCH SKILLS FROM QUERY ───────────────────────────────────
-def extract_search_skills_from_query(query):
-    """Extract skills mentioned in the search query."""
-    # Patterns that might indicate skills in a query
-    skill_patterns = [
-        r'with skills? in ([\w\s,]+)',
-        r'who knows? ([\w\s,]+)',
-        r'experience with ([\w\s,]+)',
-        r'proficient in ([\w\s,]+)',
-        r'expertise in ([\w\s,]+)',
-        r'familiar with ([\w\s,]+)',
-        r'skilled in ([\w\s,]+)',
-    ]
-    
-    for pattern in skill_patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            # Extract and split the skills
-            skills_text = match.group(1)
-            skills = [s.strip() for s in skills_text.split(',')]
-            # Check for "and" in the last item
-            if ' and ' in skills[-1]:
-                last_skills = skills[-1].split(' and ')
-                skills = skills[:-1] + [s.strip() for s in last_skills]
-            return skills
-    
-    # If no pattern match, look for known skills in the query
-    all_known_skills = set()
-    for variants in SKILL_VARIANTS.values():
-        all_known_skills.update(variants)
-    
-    found_skills = []
-    words = query.lower().split()
-    for word in words:
-        if word in all_known_skills:
-            found_skills.append(word)
-    
-    return found_skills
-
 # ── PARSE AND PROCESS RESPONSE ────────────────────────────────────────
 def extract_resume_ids_from_response(response_text):
     """Extract resumeIds from the HTML comment in the response."""
@@ -449,12 +350,12 @@ def process_response(text):
         
         # Extract the resumes - accommodate both formats (numbered and unnumbered)
         # First try standard format with blank lines
-        resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)(?:\s*\nKeywords:\s*([^\n]+))?'
+        resume_pattern = r'([A-Z][a-z]+ (?:[A-Z][a-z]+ )?(?:[A-Z][a-z]+)?)\s*\n\s*Email:\s*([^\n]+)\s*\nContact No:\s*([^\n]+)\s*\nLocation:\s*([^\n]+)\s*\nExperience:\s*([^\n]+)\s*\nSkills:\s*([^\n]+)'
         matches = re.findall(resume_pattern, text, re.MULTILINE | re.IGNORECASE)
         
         # If that didn't work, try the numbered format
         if not matches:
-            resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)(?:\s*\n\s*-\s+\*\*Keywords:\*\*\s+([^\n]+))?'
+            resume_pattern = r'\d+\.\s+\*\*([^*]+)\*\*\s*\n\s*-\s+\*\*Email:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Contact No:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Location:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Experience:\*\*\s+([^\n]+)\s*\n\s*-\s+\*\*Skills:\*\*\s+([^\n]+)'
             matches = re.findall(resume_pattern, text, re.MULTILINE)
         
         # Extract the conclusion (after all resumes)
@@ -469,12 +370,7 @@ def process_response(text):
         # Convert resume matches to structured data
         resumes = []
         for match in matches:
-            if len(match) >= 7:  # If keywords are included
-                name, email, contact, location, experience, skills, keywords = match
-                keyword_list = [k.strip() for k in keywords.split(',')] if keywords else []
-            else:  # If no keywords are included
-                name, email, contact, location, experience, skills = match
-                keyword_list = []
+            name, email, contact, location, experience, skills = match
             
             # Split skills and experience
             skill_list = [s.strip() for s in skills.split(',')]
@@ -486,8 +382,7 @@ def process_response(text):
                 "contactNo": contact.strip(),
                 "location": location.strip(),
                 "experience": exp_list,
-                "skills": skill_list,
-                "keywords": keyword_list
+                "skills": skill_list
             })
         
         return {
@@ -508,7 +403,8 @@ def process_response(text):
 def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
     """
     For every resume in resume_list that lacks a 'resumeId', look it up by (email, contactNo)
-    and add it. Also retrieves and attaches keywords from MongoDB if not present.
+    and add it. Nothing is displayed to the user because display_resume_grid ignores the field
+    unless debug mode.
     """
     if not resume_list:
         return
@@ -516,61 +412,26 @@ def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
     with get_mongo_client() as client:
         coll = client[DB_NAME][COLL_NAME]
         for res in resume_list:
+            if "resumeId" in res and res["resumeId"]:
+                continue
             email = res.get("email")
             phone = res.get("contactNo")
-            
-            # Skip if we already have both resumeId and keywords
-            if "resumeId" in res and res["resumeId"] and "keywords" in res and res["keywords"]:
-                continue
-                
-            query = {}
             if email and phone:
-                query = {"email": email, "contactNo": phone}
-            elif "resumeId" in res and res["resumeId"]:
-                query = {"resumeId": res["resumeId"]}
-            else:
-                continue
-                
-            doc = coll.find_one(
-                query,
-                {"_id": 0, "resumeId": 1, "keywords": 1},
-            )
-            
-            if doc:
-                # Add resumeId if it's missing
-                if doc.get("resumeId") and "resumeId" not in res:
+                doc = coll.find_one(
+                    {"email": email, "contactNo": phone},
+                    {"_id": 0, "resumeId": 1},
+                )
+                if doc and doc.get("resumeId"):
                     res["resumeId"] = doc["resumeId"]
-                
-                # Add keywords if they're missing or empty
-                if doc.get("keywords") and (not res.get("keywords") or len(res["keywords"]) == 0):
-                    res["keywords"] = doc["keywords"]
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
-def display_resume_grid(resumes, container=None, search_skills=None):
-    """
-    Display resumes in a 3x3 grid layout with styled cards.
-    
-    Args:
-        resumes: List of resume dictionaries to display
-        container: Optional Streamlit container to render into
-        search_skills: List of skills from the original search query to highlight
-    """
+def display_resume_grid(resumes, container=None):
+    """Display resumes in a 3x3 grid layout with styled cards."""
     target = container if container else st
     
     if not resumes:
         target.warning("No resumes found matching the criteria.")
         return
-    
-    # Normalize search skills for case-insensitive comparison
-    search_skills_lower = []
-    if search_skills:
-        # Flatten and normalize search skills
-        search_skills_lower = [s.lower() for s in search_skills]
-        # Add expansions from variants
-        for skill in list(search_skills_lower):  # Create a copy to avoid modifying during iteration
-            expanded = [s.lower() for s in SKILL_VARIANTS.get(skill.lower(), [])]
-            search_skills_lower.extend(expanded)
-        search_skills_lower = list(set(search_skills_lower))  # Remove duplicates
     
     # Custom CSS for the resume cards
     target.markdown("""
@@ -627,26 +488,6 @@ def display_resume_grid(resumes, container=None, search_skills=None):
         font-size: 12px;
         font-weight: 500;
     }
-    .keyword-tag {
-        display: inline-block;
-        background-color: #fff8e1;
-        color: #f57c00;
-        border-radius: 12px;
-        padding: 3px 10px;
-        margin: 3px;
-        font-size: 12px;
-        font-weight: 500;
-    }
-    .matching-skill {
-        background-color: #e3f2fd;
-        color: #0d47a1;
-        border: 1px solid #bbdefb;
-    }
-    .matching-keyword {
-        background-color: #fff3e0;
-        color: #e65100;
-        border: 1px solid #ffe0b2;
-    }
     .job-matches {
         margin-top: 8px;
         padding: 4px 10px;
@@ -686,7 +527,6 @@ def display_resume_grid(resumes, container=None, search_skills=None):
                 # Get experience and skills
                 experience = resume.get("experience", [])
                 skills = resume.get("skills", [])
-                keywords = resume.get("keywords", [])
                 
                 # Get job matches if available
                 job_matches = resume.get("jobsMatched")
@@ -718,24 +558,7 @@ def display_resume_grid(resumes, container=None, search_skills=None):
                     if skills:
                         html += f'<div class="resume-section-title">Skills</div><div>'
                         for skill in skills[:7]:  # Limit to 7 skills
-                            skill_str = str(skill)
-                            if isinstance(skill, dict) and "skillName" in skill:
-                                # Handle skills objects with skillName field
-                                skill_str = skill["skillName"]
-                            
-                            is_matching = search_skills_lower and skill_str.lower() in search_skills_lower
-                            matching_class = " matching-skill" if is_matching else ""
-                            html += f'<span class="skill-tag{matching_class}">{skill_str}</span>'
-                        html += '</div>'
-                    
-                    # Add keywords section
-                    if keywords:
-                        html += f'<div class="resume-section-title">Keywords</div><div>'
-                        for keyword in keywords[:7]:  # Limit to 7 keywords
-                            keyword_str = str(keyword)
-                            is_matching = search_skills_lower and keyword_str.lower() in search_skills_lower
-                            matching_class = " matching-keyword" if is_matching else ""
-                            html += f'<span class="keyword-tag{matching_class}">{keyword_str}</span>'
+                            html += f'<span class="skill-tag">{skill}</span>'
                         html += '</div>'
                     
                     # Show resume ID in debug mode
@@ -756,18 +579,6 @@ agent_prompt = ChatPromptTemplate.from_messages(
             """
 You are a helpful HR assistant named ZappBot.
 
-# Resume Filtering
-When searching for resumes, always use the `query_db` tool with all relevant parameters:
-- `query`: The full user's search query
-- `country`: The country filter if specified
-- `min_experience_years`: Years of experience (minimum) if mentioned
-- `max_experience_years`: Years of experience (maximum) if mentioned
-- `job_titles`: A list of job titles to search for
-- `skills`: A list of all skills mentioned in the query
-- `top_k`: Default is 50
-
-Always extract both skills and keywords from the database. Make sure when showing the search results, you include both the 'skills' and 'keywords' fields in your response.
-
 # Resume Formatting
 When displaying resume results, always format them consistently as follows:
 
@@ -783,7 +594,6 @@ Contact No: [phone]
 Location: [location]
 Experience: [experience1], [experience2], [experience3]
 Skills: [skill1], [skill2], [skill3], [skill4]
-Keywords: [keyword1], [keyword2], [keyword3], [keyword4]
 
 Maintain this precise format with consistent spacing and no bullet points or numbering, as it allows our UI to extract and display the resumes in a grid layout.
 
@@ -1061,11 +871,8 @@ with chat_container:
                         if resume_id and resume_id in st.session_state.job_match_data:
                             resume["jobsMatched"] = st.session_state.job_match_data[resume_id]
                 
-                # Extract any skills from the original query to highlight matching skills
-                search_skills = extract_search_skills_from_query(resp['query'])
-                
-                # Display the resume grid with highlighted search skills
-                display_resume_grid(resp['processed']['resumes'], search_skills=search_skills)
+                # Display the resume grid
+                display_resume_grid(resp['processed']['resumes'])
                 
                 # Add a row with email button and job match button
                 cols = st.columns([2, 1, 1])

@@ -21,7 +21,7 @@ DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL_NAME = "gpt-4o"
-TOP_K_DEFAULT = 50
+TOP_K_DEFAULT = 25
 
 # Connect to MongoDB
 def get_mongo_client() -> MongoClient:

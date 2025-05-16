@@ -211,7 +211,19 @@ def display_candidate_profiles(candidates: List[Dict[str, Any]]):
                 
                 # Calculate total experience
                 experiences = candidate.get("jobExperiences", [])
-                total_exp = sum(float(exp.get("duration", 0)) for exp in experiences if exp.get("duration", "").isdigit() or exp.get("duration", "").replace(".", "").isdigit())
+                total_exp = 0
+                for exp in experiences:
+                    duration = exp.get("duration", "0")
+                    if duration is not None:
+                        # Convert duration to float if possible
+                        try:
+                            if isinstance(duration, str) and (duration.isdigit() or duration.replace(".", "").isdigit()):
+                                total_exp += float(duration)
+                            elif isinstance(duration, (int, float)):
+                                total_exp += float(duration)
+                        except (ValueError, TypeError):
+                            # Skip invalid durations
+                            pass
                 st.markdown(f"**Total Experience:** {total_exp} years")
             
             with col2:

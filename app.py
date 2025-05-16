@@ -21,7 +21,7 @@ DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL_NAME = "gpt-4o"
-TOP_K_DEFAULT = 25
+TOP_K_DEFAULT = 50
 
 # Connect to MongoDB
 def get_mongo_client() -> MongoClient:
@@ -258,21 +258,68 @@ def main():
     st.title("ZappBot Resume Search")
     st.write("Direct LangChain-based resume search without dictionary variants or regex")
     
+    # Debug mode toggle
+    debug_mode = st.sidebar.checkbox("Debug Mode", value=False)
+    
     # Search form
     with st.form("search_form"):
         query = st.text_area("Search Query", 
                              "Find software developer in Indonesia with 3 years experience and SQL and Python skills",
                              height=100)
-        top_k = st.number_input("Number of results", min_value=1, max_value=50, value=10)
+        top_k = st.number_input("Number of results", min_value=1, max_value=20, value=10)
         submit_button = st.form_submit_button("Search")
     
     if submit_button:
         with st.spinner("Searching for candidates..."):
             # Step 1: Get candidates from MongoDB (minimal filtering)
-            candidates = get_candidate_profiles(query, top_k=50)  # Get more candidates for LLM to analyze
+            # Reduced from 50 to 20 for convenience
+            candidates = get_candidate_profiles(query, top_k=20)
+            
+            # Debug: Show the raw candidates data if debug mode is enabled
+            if debug_mode:
+                with st.expander("Debug: Raw Candidates Data (First 20)"):
+                    # Create a sanitized version without large embedding fields
+                    sanitized_candidates = []
+                    for c in candidates[:20]:  # Only show first 20
+                        sanitized = {k: v for k, v in c.items() if k != 'embedding'}
+                        # Further simplify the output
+                        if 'skills' in sanitized:
+                            sanitized['skills'] = [s.get('skillName') if isinstance(s, dict) else s 
+                                                for s in sanitized['skills']][:5]  # Show only first 5 skills
+                        if 'jobExperiences' in sanitized:
+                            sanitized['jobExperiences'] = [
+                                {'title': j.get('title', ''), 'duration': j.get('duration', '')}
+                                for j in sanitized['jobExperiences']
+                            ][:3]  # Show only first 3 jobs
+                        if 'keywords' in sanitized:
+                            sanitized['keywords'] = sanitized['keywords'][:5]  # Show only first 5 keywords
+                        sanitized_candidates.append(sanitized)
+                    
+                    st.json(sanitized_candidates)
             
             # Step 2: Use LangChain to score and rank candidates
             top_candidates = score_candidates_with_langchain(query, candidates, top_k=top_k)
+            
+            # Debug: Show the data sent to LangChain if debug mode is enabled
+            if debug_mode:
+                with st.expander("Debug: Data Sent to LangChain"):
+                    # Show the data structure sent to LangChain
+                    candidate_data = [
+                        {
+                            "resumeId": c.get("resumeId", ""),
+                            "name": c.get("name", "Unknown"),
+                            "skills": [s.get("skillName") for s in c.get("skills", []) if isinstance(s, dict) and "skillName" in s],
+                            "keywords": c.get("keywords", []),
+                            "jobExperiences": [
+                                {
+                                    "title": j.get("title", ""),
+                                    "duration": j.get("duration", "")
+                                } for j in c.get("jobExperiences", [])
+                            ],
+                            "country": c.get("country", "")
+                        } for c in candidates[:5]  # Show only first 5 for brevity
+                    ]
+                    st.json(candidate_data)
             
             # Step 3: Display results
             display_candidate_profiles(top_candidates)

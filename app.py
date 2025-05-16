@@ -1,420 +1,269 @@
 import streamlit as st
-import os, json, re
-from pymongo import MongoClient
+import json
 from typing import List, Dict, Any, Optional
+from pymongo import MongoClient
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import ResponseSchema, StructuredOutputParser
 
 # Configuration
-st.set_page_config(page_title="Resume Search Tester", layout="wide")
+st.set_page_config(page_title="ZappBot Resume Search", layout="wide")
 
 # MongoDB connection settings
-# You can replace these with your actual credentials or use secrets
 MONGO_CFG = {
     "host": "notify.pesuacademy.com",
     "port": 27017,
     "username": "admin",
-    "password": st.secrets["MONGO_PASS"] if "MONGO_PASS" in st.secrets else "",
+    "password": st.secrets["MONGO_PASS"],
     "authSource": "admin",
 }
 DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+MODEL_NAME = "gpt-4o"
 TOP_K_DEFAULT = 50
 
-# --- Variant dictionaries (from your original code) ---
-COUNTRY_EQUIV = {
-    "indonesia": ["indonesia"],
-    "vietnam": ["vietnam", "viet nam", "vn", "vietnamese"],
-    "united states": ["united states", "usa", "us"],
-    "malaysia": ["malaysia"],
-    "india": ["india", "ind"],
-    "singapore": ["singapore"],
-    "philippines": ["philippines", "the philippines"],
-    "australia": ["australia"],
-    "new zealand": ["new zealand"],
-    "germany": ["germany"],
-    "saudi arabia": ["saudi arabia", "ksa"],
-    "japan": ["japan"],
-    "hong kong": ["hong kong", "hong kong sar"],
-    "thailand": ["thailand"],
-    "united arab emirates": ["united arab emirates", "uae"],
-}
-
-SKILL_VARIANTS = {
-    "sql": ["sql", "mysql", "microsoft sql server"],
-    "javascript": ["javascript", "js", "java script"],
-    "c#": ["c#", "c sharp", "csharp"],
-    "html": ["html", "hypertext markup language"],
-}
-
-TITLE_VARIANTS = {
-    "software developer": [
-        "software developer",
-        "software dev",
-        "softwaredeveloper",
-        "software engineer",
-    ],
-    "backend developer": [
-        "backend developer",
-        "backend dev",
-        "back-end developer",
-        "server-side developer",
-    ],
-    "frontend developer": [
-        "frontend developer",
-        "frontend dev",
-        "front-end developer",
-    ],
-}
-
-# --- Helper Functions ---
+# Connect to MongoDB
 def get_mongo_client() -> MongoClient:
-    """Create and return a MongoDB client."""
     return MongoClient(**MONGO_CFG)
 
-def expand(values: List[str], table: Dict[str, List[str]]) -> List[str]:
-    """Expand terms using the variant dictionaries."""
-    out = set()
-    for v in values:
-        if not v or not isinstance(v, str):
-            continue
-        v_low = v.strip().lower()
-        out.update(table.get(v_low, []))
-        out.add(v)
-    return list(out)
-
-def search_resumes(
-    query_text: str,
-    country: Optional[str] = None,
-    min_experience_years: Optional[int] = None,
-    job_titles: Optional[List[str]] = None,
-    skills: Optional[List[str]] = None,
-    search_method: str = "basic",
-    top_k: int = TOP_K_DEFAULT,
-) -> Dict[str, Any]:
+# Direct query to MongoDB with minimal filtering
+def get_candidate_profiles(query_text: str, top_k: int = TOP_K_DEFAULT) -> List[Dict[str, Any]]:
     """
-    Search for resumes in MongoDB using different search methods.
-    
-    Args:
-        query_text: Raw query text (for reference only)
-        country: Country filter
-        min_experience_years: Minimum years of experience
-        job_titles: List of job titles to search for
-        skills: List of skills to search for
-        search_method: Which search method to use
-        top_k: Maximum number of results to return
-        
-    Returns:
-        Dictionary with search results and metadata
+    Get candidate profiles from MongoDB with minimal filtering.
     """
     try:
-        # Connect to MongoDB
-        mongo_q = {}
-        
-        # Choose search method
-        if search_method == "basic":
-            # Basic search with OR logic
-            or_conditions = []
-            
-            # Job title matching
-            if job_titles and len(job_titles) > 0:
-                expanded_titles = expand(job_titles, TITLE_VARIANTS)
-                or_conditions.append(
-                    {"jobExperiences.title": {"$in": expanded_titles}}
-                )
-            
-            # Skills matching
-            if skills and len(skills) > 0:
-                expanded_skills = expand(skills, SKILL_VARIANTS)
-                skill_condition = {
-                    "$or": [
-                        {"skills.skillName": {"$in": expanded_skills}},
-                        {"keywords": {"$in": expanded_skills}}
-                    ]
-                }
-                or_conditions.append(skill_condition)
-            
-            # Country matching
-            if country:
-                country_values = COUNTRY_EQUIV.get(country.strip().lower(), [country])
-                or_conditions.append(
-                    {"country": {"$in": country_values}}
-                )
-            
-            # Combine with OR logic
-            if or_conditions:
-                mongo_q["$or"] = or_conditions
-                
-        elif search_method == "regex":
-            # Regex-based search with OR logic
-            or_conditions = []
-            
-            # Job title matching with regex
-            if job_titles and len(job_titles) > 0:
-                title_conditions = []
-                for title in job_titles:
-                    if title and isinstance(title, str):
-                        title_low = title.strip().lower()
-                        # Add direct title variants
-                        expanded = TITLE_VARIANTS.get(title_low, [title])
-                        title_conditions.append({
-                            "jobExperiences.title": {"$in": expanded}
-                        })
-                        # Add regex pattern
-                        title_conditions.append({
-                            "jobExperiences.title": {
-                                "$regex": f"\\b{re.escape(title_low)}\\b",
-                                "$options": "i"
-                            }
-                        })
-                if title_conditions:
-                    or_conditions.append({"$or": title_conditions})
-            
-            # Skills matching with regex
-            if skills and len(skills) > 0:
-                skill_conditions = []
-                for skill in skills:
-                    if skill and isinstance(skill, str):
-                        skill_low = skill.strip().lower()
-                        # Add direct skill variants
-                        expanded = SKILL_VARIANTS.get(skill_low, [skill])
-                        skill_conditions.append({
-                            "skills.skillName": {"$in": expanded}
-                        })
-                        skill_conditions.append({
-                            "keywords": {"$in": expanded}
-                        })
-                        # Add regex patterns
-                        skill_conditions.append({
-                            "skills.skillName": {
-                                "$regex": f"\\b{re.escape(skill_low)}\\b",
-                                "$options": "i"
-                            }
-                        })
-                        skill_conditions.append({
-                            "keywords": {
-                                "$regex": f"\\b{re.escape(skill_low)}\\b",
-                                "$options": "i"
-                            }
-                        })
-                if skill_conditions:
-                    or_conditions.append({"$or": skill_conditions})
-            
-            # Country matching with regex
-            if country:
-                country_values = COUNTRY_EQUIV.get(country.strip().lower(), [country])
-                country_conditions = []
-                country_conditions.append({
-                    "country": {"$in": country_values}
-                })
-                country_conditions.append({
-                    "country": {
-                        "$regex": f"^{re.escape(country)}$",
-                        "$options": "i"
-                    }
-                })
-                or_conditions.append({"$or": country_conditions})
-            
-            # Combine with OR logic
-            if or_conditions:
-                mongo_q["$or"] = or_conditions
-                
-        elif search_method == "strict":
-            # Strict search with AND logic
-            and_conditions = []
-            
-            # Country filter
-            if country:
-                country_values = COUNTRY_EQUIV.get(country.strip().lower(), [country])
-                and_conditions.append({
-                    "country": {"$in": country_values}
-                })
-            
-            # Job title filter
-            if job_titles and len(job_titles) > 0:
-                expanded_titles = expand(job_titles, TITLE_VARIANTS)
-                and_conditions.append({
-                    "jobExperiences.title": {"$in": expanded_titles}
-                })
-            
-            # Skills filter - require ALL skills
-            if skills and len(skills) > 0:
-                expanded_skills = expand(skills, SKILL_VARIANTS)
-                for skill in expanded_skills:
-                    and_conditions.append({
-                        "$or": [
-                            {"skills.skillName": skill},
-                            {"keywords": skill}
-                        ]
-                    })
-            
-            # Experience filter
-            if isinstance(min_experience_years, int) and min_experience_years > 0:
-                and_conditions.append({
-                    "$expr": {
-                        "$gte": [
-                            {"$sum": {
-                                "$map": {
-                                    "input": {"$ifNull": ["$jobExperiences", []]},
-                                    "as": "job",
-                                    "in": {
-                                        "$convert": {
-                                            "input": {"$ifNull": ["$$job.duration", "0"]},
-                                            "to": "double",
-                                            "onError": 0,
-                                            "onNull": 0
-                                        }
-                                    }
-                                }
-                            }},
-                            min_experience_years
-                        ]
-                    }
-                })
-            
-            # Combine with AND logic
-            if and_conditions:
-                mongo_q["$and"] = and_conditions
-        
-        # Execute the query
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
             
-            # Find candidates matching the criteria
-            candidates = list(coll.find(mongo_q, {"_id": 0}).limit(top_k))
+            # Simply get all profiles without filtering
+            # We'll use the LLM to score them instead
+            candidates = list(coll.find({}, {
+                "_id": 0, 
+                "embedding": 0  # Exclude embedding field as it's large and not needed
+            }).limit(top_k))
             
-            # Get a sample document structure if available
-            sample_structure = None
-            if candidates:
-                sample = candidates[0]
-                sample_structure = {
-                    "fields": list(sample.keys()),
-                    "jobExperiences": sample.get("jobExperiences", [])[:1] if "jobExperiences" in sample else None,
-                    "skills": sample.get("skills", [])[:3] if "skills" in sample else None,
-                    "keywords": sample.get("keywords", [])[:3] if "keywords" in sample else None,
-                    "country": sample.get("country", None)
-                }
-        
-        # Return the results
-        return {
-            "query": mongo_q,
-            "count": len(candidates),
-            "candidates": candidates,
-            "sample_structure": sample_structure
-        }
-    
+            return candidates
     except Exception as e:
+        st.error(f"Database error: {str(e)}")
+        return []
+
+# Use LangChain to score candidates based on the query
+def score_candidates_with_langchain(query: str, candidates: List[Dict[str, Any]], top_k: int = 10) -> List[Dict[str, Any]]:
+    """
+    Score candidates using LangChain and return the top matches.
+    """
+    try:
+        if not candidates:
+            return []
+        
+        # Initialize LangChain components
+        llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
+        
+        # Define output schema for structured parsing
+        response_schemas = [
+            ResponseSchema(name="top_candidates", 
+                          description=f"List of IDs for the top {top_k} candidates that best match the query"),
+            ResponseSchema(name="reasoning", 
+                          description="Brief explanation of how you evaluated the candidates")
+        ]
+        output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+        format_instructions = output_parser.get_format_instructions()
+        
+        # Create prompt template
+        template = """
+        You are a sophisticated HR matching system. Your task is to identify the best candidates 
+        for a job based on the given query.
+        
+        QUERY: {query}
+        
+        CANDIDATES:
+        {candidates}
+        
+        Analyze each candidate's profile and evaluate how well they match the query. 
+        Consider these factors:
+        1. Job titles matching the requirements
+        2. Relevant skills and keywords
+        3. Experience level
+        4. Location if specified
+        
+        Select the top {top_k} candidates that best match the query.
+        
+        {format_instructions}
+        """
+        
+        prompt = ChatPromptTemplate.from_template(template)
+        
+        # Prepare candidate data (with resumeIds and names for reference)
+        candidate_data = [
+            {
+                "resumeId": c.get("resumeId", ""),
+                "name": c.get("name", "Unknown"),
+                "skills": [s.get("skillName") for s in c.get("skills", []) if isinstance(s, dict) and "skillName" in s],
+                "keywords": c.get("keywords", []),
+                "jobExperiences": [
+                    {
+                        "title": j.get("title", ""),
+                        "duration": j.get("duration", "")
+                    } for j in c.get("jobExperiences", [])
+                ],
+                "country": c.get("country", "")
+            } for c in candidates
+        ]
+        
+        # Invoke LLM
+        chain = prompt | llm
+        response = chain.invoke({
+            "query": query,
+            "candidates": json.dumps(candidate_data, indent=2),
+            "top_k": top_k,
+            "format_instructions": format_instructions
+        })
+        
+        # Parse response
+        parsed_output = output_parser.parse(response.content)
+        top_ids = parsed_output.get("top_candidates", [])
+        
+        # Extract top candidates
+        top_candidates = [c for c in candidates if c.get("resumeId") in top_ids]
+        
+        return top_candidates
+        
+    except Exception as e:
+        st.error(f"LangChain scoring error: {str(e)}")
         import traceback
-        return {
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "query": mongo_q if 'mongo_q' in locals() else None
-        }
+        st.error(traceback.format_exc())
+        return []
 
-# --- Streamlit UI ---
-st.title("Resume Search Tester")
-st.write("This app lets you test the resume search functionality and see the raw MongoDB results.")
-
-# Search form
-with st.form("search_form"):
-    col1, col2 = st.columns(2)
+# Display candidates in a neat format
+def display_candidate_profiles(candidates: List[Dict[str, Any]]):
+    """
+    Display candidate profiles in a clean format.
+    """
+    if not candidates:
+        st.warning("No matching candidates found.")
+        return
     
-    with col1:
-        query_text = st.text_input("Raw Query Text (for reference only)", 
-                                   "Find software developer in Indonesia with SQL and Python skills")
-        country = st.text_input("Country", "Indonesia")
-        min_exp = st.number_input("Minimum Experience (years)", min_value=0, value=0, step=1)
+    st.success(f"Found {len(candidates)} matching candidates")
     
-    with col2:
-        job_titles_input = st.text_input("Job Titles (comma-separated)", "software developer")
-        job_titles = [t.strip() for t in job_titles_input.split(",")] if job_titles_input else []
-        
-        skills_input = st.text_input("Skills (comma-separated)", "SQL, Python")
-        skills = [s.strip() for s in skills_input.split(",")] if skills_input else []
-        
-        search_method = st.selectbox(
-            "Search Method", 
-            ["basic", "regex", "strict"],
-            format_func=lambda x: {
-                "basic": "Basic (OR logic, exact matches)",
-                "regex": "Regex (OR logic, flexible matching)",
-                "strict": "Strict (AND logic, exact matches)"
-            }.get(x, x)
-        )
+    # Custom CSS for better display
+    st.markdown("""
+    <style>
+    .resume-card {
+        border: 1px solid #e1e4e8;
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 15px;
+        background-color: white;
+        box-shadow: 0 3px 8px rgba(0,0,0,0.05);
+    }
+    .resume-name {
+        font-weight: bold;
+        font-size: 18px;
+        margin-bottom: 8px;
+        color: #24292e;
+    }
+    .resume-location {
+        color: #586069;
+        font-size: 14px;
+        margin-bottom: 10px;
+    }
+    .resume-contact {
+        margin-bottom: 8px;
+        font-size: 14px;
+        color: #444d56;
+    }
+    .resume-section-title {
+        font-weight: 600;
+        margin-top: 12px;
+        margin-bottom: 6px;
+        font-size: 15px;
+        color: #24292e;
+    }
+    .resume-experience {
+        font-size: 14px;
+        color: #444d56;
+        margin-bottom: 4px;
+    }
+    .skill-tag {
+        display: inline-block;
+        background-color: #f1f8ff;
+        color: #0366d6;
+        border-radius: 12px;
+        padding: 3px 10px;
+        margin: 3px;
+        font-size: 12px;
+        font-weight: 500;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
-    submit_button = st.form_submit_button("Search Resumes")
-
-# Execute search when form is submitted
-if submit_button:
-    with st.spinner("Searching..."):
-        results = search_resumes(
-            query_text=query_text,
-            country=country,
-            min_experience_years=min_exp,
-            job_titles=job_titles,
-            skills=skills,
-            search_method=search_method
-        )
-    
-    # Display results
-    if "error" in results:
-        st.error(f"Error: {results['error']}")
-        st.code(results["traceback"])
-    else:
-        st.success(f"Found {results['count']} matching resumes")
-        
-        # Show the MongoDB query
-        with st.expander("MongoDB Query", expanded=True):
-            st.code(json.dumps(results["query"], indent=2))
-        
-        # Show sample document structure
-        if results["sample_structure"]:
-            with st.expander("Sample Document Structure", expanded=True):
-                st.json(results["sample_structure"])
-        
-        # Show the raw results
-        with st.expander(f"Raw Results ({results['count']} records)", expanded=False):
-            st.json(results["candidates"])
-        
-        # Display candidates in a more readable format
-        st.subheader("Matching Candidates")
-        
-        for i, candidate in enumerate(results["candidates"]):
-            with st.expander(f"Candidate {i+1}: {candidate.get('name', 'Unknown')}"):
-                # Basic information
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write(f"**Name:** {candidate.get('name', 'N/A')}")
-                    st.write(f"**Email:** {candidate.get('email', 'N/A')}")
-                    st.write(f"**Contact:** {candidate.get('contactNo', 'N/A')}")
-                    st.write(f"**Country:** {candidate.get('country', 'N/A')}")
-                    st.write(f"**ResumeId:** {candidate.get('resumeId', 'N/A')}")
+    # Display each candidate in a card
+    for candidate in candidates:
+        with st.expander(f"{candidate.get('name', 'Unknown')} - {candidate.get('country', 'Unknown')}"):
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.markdown(f"**ResumeID:** {candidate.get('resumeId', 'N/A')}")
+                st.markdown(f"**Email:** {candidate.get('email', 'N/A')}")
+                st.markdown(f"**Phone:** {candidate.get('contactNo', 'N/A')}")
+                st.markdown(f"**Location:** {candidate.get('country', 'N/A')}")
                 
-                # Job experience
-                st.write("**Job Experience:**")
-                job_exp = candidate.get("jobExperiences", [])
-                if job_exp:
-                    for job in job_exp:
-                        st.write(f"- {job.get('title', 'N/A')} ({job.get('duration', 'N/A')} years)")
-                else:
-                    st.write("- No job experience found")
+                # Calculate total experience
+                experiences = candidate.get("jobExperiences", [])
+                total_exp = sum(float(exp.get("duration", 0)) for exp in experiences if exp.get("duration", "").isdigit() or exp.get("duration", "").replace(".", "").isdigit())
+                st.markdown(f"**Total Experience:** {total_exp} years")
+            
+            with col2:
+                # Job experiences
+                st.markdown("### Job Experiences")
+                for job in candidate.get("jobExperiences", []):
+                    if job.get("title") and job.get("companyName"):
+                        duration = job.get("duration", "N/A")
+                        st.markdown(f"- **{job.get('title')}** at {job.get('companyName')} ({duration} years)")
                 
                 # Skills
-                st.write("**Skills:**")
-                skills_list = candidate.get("skills", [])
-                if skills_list:
-                    skill_text = ""
-                    for skill in skills_list:
-                        if isinstance(skill, dict):
-                            skill_text += f"- {skill.get('skillName', 'N/A')}\n"
-                        else:
-                            skill_text += f"- {skill}\n"
-                    st.text(skill_text)
-                else:
-                    st.write("- No skills found")
+                st.markdown("### Skills")
+                skills_html = ""
+                skills = candidate.get("skills", [])
+                for skill in skills:
+                    if isinstance(skill, dict) and "skillName" in skill:
+                        skills_html += f'<span class="skill-tag">{skill["skillName"]}</span>'
+                
+                st.markdown(skills_html, unsafe_allow_html=True)
                 
                 # Keywords
-                st.write("**Keywords:**")
                 keywords = candidate.get("keywords", [])
                 if keywords:
-                    st.write(", ".join(keywords))
-                else:
-                    st.write("- No keywords found")
+                    st.markdown("### Keywords")
+                    keywords_html = ""
+                    for keyword in keywords:
+                        keywords_html += f'<span class="skill-tag">{keyword}</span>'
+                    st.markdown(keywords_html, unsafe_allow_html=True)
+
+# Main application
+def main():
+    st.title("ZappBot Resume Search")
+    st.write("Direct LangChain-based resume search without dictionary variants or regex")
+    
+    # Search form
+    with st.form("search_form"):
+        query = st.text_area("Search Query", 
+                             "Find software developer in Indonesia with 3 years experience and SQL and Python skills",
+                             height=100)
+        top_k = st.number_input("Number of results", min_value=1, max_value=50, value=10)
+        submit_button = st.form_submit_button("Search")
+    
+    if submit_button:
+        with st.spinner("Searching for candidates..."):
+            # Step 1: Get candidates from MongoDB (minimal filtering)
+            candidates = get_candidate_profiles(query, top_k=50)  # Get more candidates for LLM to analyze
+            
+            # Step 2: Use LangChain to score and rank candidates
+            top_candidates = score_candidates_with_langchain(query, candidates, top_k=top_k)
+            
+            # Step 3: Display results
+            display_candidate_profiles(top_candidates)
+
+if __name__ == "__main__":
+    main()

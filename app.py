@@ -172,7 +172,7 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
 # ── TOOLS ─────────────────────────────────────────────────────────────
 @tool
 def query_db(
-    query: str,
+    query: str = "",
     country: Optional[str] = None,
     min_experience_years: Optional[float] = None,
     max_experience_years: Optional[float] = None,   # still supported

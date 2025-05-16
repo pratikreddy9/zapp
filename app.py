@@ -158,6 +158,7 @@ SKILL_VARIANTS = {
     "c#": ["c#", "c sharp", "csharp"],
     "html": ["html", "hypertext markup language"],
 }
+TITLE_VARIANTS = {
     "backend developer": [
         "backend developer",
         "backend dev",

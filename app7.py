@@ -198,7 +198,7 @@ def query_db(
                 {
                     "$expr": {
                         "$gte": [
-                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
+                            {"$toDouble": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
                             min_experience_years,
                         ]
                     }

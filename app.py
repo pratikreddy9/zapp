@@ -450,7 +450,8 @@ def process_response(text):
                 "contactNo": contact.strip(),
                 "location": location.strip(),
                 "experience": exp_list,
-                "skills": skill_list
+                "skills": skill_list,
+                "keywords": []  # Initialize empty keywords list; will be populated when we retrieve from DB
             })
         
         return {
@@ -467,12 +468,13 @@ def process_response(text):
             "full_text": text
         }
 
+
 # ── HELPER: attach missing resumeIds without showing them ──────────────
 def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
     """
     For every resume in resume_list that lacks a 'resumeId', look it up by (email, contactNo)
-    and add it. Nothing is displayed to the user because display_resume_grid ignores the field
-    unless debug mode.
+    and add it. Also fetches keywords. Nothing is displayed to the user because 
+    display_resume_grid ignores the field unless debug mode.
     """
     if not resume_list:
         return
@@ -480,21 +482,25 @@ def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
     with get_mongo_client() as client:
         coll = client[DB_NAME][COLL_NAME]
         for res in resume_list:
-            if "resumeId" in res and res["resumeId"]:
-                continue
             email = res.get("email")
             phone = res.get("contactNo")
             if email and phone:
                 doc = coll.find_one(
                     {"email": email, "contactNo": phone},
-                    {"_id": 0, "resumeId": 1},
+                    {"_id": 0, "resumeId": 1, "keywords": 1},
                 )
-                if doc and doc.get("resumeId"):
-                    res["resumeId"] = doc["resumeId"]
+                if doc:
+                    if doc.get("resumeId"):
+                        res["resumeId"] = doc["resumeId"]
+                    if doc.get("keywords"):
+                        res["keywords"] = doc["keywords"]
+
+
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
+# === CHANGE 3: Update display_resume_grid to show keywords ===
 def display_resume_grid(resumes, container=None):
-    """Display resumes in a 3x3 grid layout with styled cards, including both skills and keywords."""
+    """Display resumes in a 3x3 grid layout with styled cards."""
     target = container if container else st
     
     if not resumes:
@@ -558,8 +564,8 @@ def display_resume_grid(resumes, container=None):
     }
     .keyword-tag {
         display: inline-block;
-        background-color: #fff8e1; 
-        color: #ff8f00;
+        background-color: #FFF8E1;
+        color: #FF8F00;
         border-radius: 12px;
         padding: 3px 10px;
         margin: 3px;
@@ -600,24 +606,12 @@ def display_resume_grid(resumes, container=None):
                 email = resume.get("email", "")
                 phone = resume.get("contactNo", "")
                 location = resume.get("location", "")
-                resume_id = resume.get("resumeId", "")
+                resume_id = resume.get("resumeId", "")  # Extract resumeId for job matching
                 
                 # Get experience and skills
                 experience = resume.get("experience", [])
-                
-                # Handle skills - normalize from MongoDB format if needed
                 skills = resume.get("skills", [])
-                skill_names = []
-                
-                if isinstance(skills, list):
-                    for skill in skills:
-                        if isinstance(skill, dict) and "skillName" in skill:
-                            skill_names.append(skill["skillName"])
-                        elif isinstance(skill, str):
-                            skill_names.append(skill)
-                            
-                # Get keywords
-                keywords = resume.get("keywords", [])
+                keywords = resume.get("keywords", [])  # Extract keywords
                 
                 # Get job matches if available
                 job_matches = resume.get("jobsMatched")
@@ -645,17 +639,17 @@ def display_resume_grid(resumes, container=None):
                         for exp in experience[:3]:  # Limit to 3 experiences
                             html += f'<div class="resume-experience">• {exp}</div>'
                     
-                    # Add skills section with blue tags
-                    if skill_names:
+                    # Add skills section
+                    if skills:
                         html += f'<div class="resume-section-title">Skills</div><div>'
-                        for skill in skill_names[:7]:  # Limit to 7 skills
+                        for skill in skills[:7]:  # Limit to 7 skills
                             html += f'<span class="skill-tag">{skill}</span>'
                         html += '</div>'
                     
-                    # Add keywords section with orange tags - NEWLY ADDED
+                    # Add keywords section (with different styling)
                     if keywords:
                         html += f'<div class="resume-section-title">Keywords</div><div>'
-                        for keyword in keywords[:7]:  # Limit to 7 keywords
+                        for keyword in keywords[:5]:  # Limit to 5 keywords
                             html += f'<span class="keyword-tag">{keyword}</span>'
                         html += '</div>'
                     
@@ -665,6 +659,66 @@ def display_resume_grid(resumes, container=None):
                     
                     html += '</div>'
                     st.markdown(html, unsafe_allow_html=True)
+
+# === CHANGE 4: Fix $toInt in query_db to handle decimal job experience ===
+@tool
+def query_db(
+    query: str,
+    country: Optional[str] = None,
+    min_experience_years: Optional[int] = None,
+    max_experience_years: Optional[int] = None,
+    job_titles: Optional[List[str]] = None,
+    skills: Optional[List[str]] = None,
+    top_k: int = TOP_K_DEFAULT,
+) -> Dict[str, Any]:
+    """Filter MongoDB resumes and return top 10 matches."""
+    try:
+        mongo_q: Dict[str, Any] = {}
+        if country:
+            mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
+        if skills:
+            expanded = expand(skills, SKILL_VARIANTS)
+            mongo_q["$or"] = [
+                {"skills.skillName": {"$in": expanded}},
+                {"keywords": {"$in": expanded}},
+            ]
+        and_clauses = []
+        if job_titles:
+            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
+        if isinstance(min_experience_years, int) and min_experience_years > 0:
+            and_clauses.append(
+                {
+                    "$expr": {
+                        "$gte": [
+                            # Changed $toInt to $convert with output as double to handle decimal values
+                            {"$convert": {
+                                "input": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]},
+                                "to": "double",
+                                "onError": 0,
+                                "onNull": 0
+                            }},
+                            min_experience_years,
+                        ]
+                    }
+                }
+            )
+        if and_clauses:
+            mongo_q["$and"] = and_clauses
+        with get_mongo_client() as client:
+            coll = client[DB_NAME][COLL_NAME]
+            candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
+        best_ids = score_resumes(query, candidates)
+        best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
+        return {
+            "message": f"{len(best_resumes)} resumes after scoring.",
+            "results_count": len(best_resumes),
+            "results": best_resumes,
+            "completed_at": datetime.utcnow().isoformat(),
+        }
+    except PyMongoError as err:
+        return {"error": f"DB error: {str(err)}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)

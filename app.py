@@ -760,7 +760,7 @@ When searching for resumes, always use the `query_db` tool with all relevant par
 - `max_experience_years`: Years of experience (maximum) if mentioned
 - `job_titles`: A list of job titles to search for
 - `skills`: A list of all skills mentioned in the query
-- `top_k`: Default is 50
+- `top_k`: Default is 20
 
 Our search process retrieves up to 50 matching resumes and then selects the 10 best matches based on the query criteria.
 

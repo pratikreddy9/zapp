@@ -181,36 +181,127 @@ def query_db(
 ) -> Dict[str, Any]:
     """Filter MongoDB resumes and return top 10 matches."""
     try:
+        # Start with an empty query
         mongo_q: Dict[str, Any] = {}
-        if country:
-            mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
-        if skills:
-            expanded = expand(skills, SKILL_VARIANTS)
-            mongo_q["$or"] = [
-                {"skills.skillName": {"$in": expanded}},
-                {"keywords": {"$in": expanded}},
-            ]
         and_clauses = []
-        if job_titles:
-            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
-        if isinstance(min_experience_years, int) and min_experience_years > 0:
+        
+        # Country filter (if provided)
+        if country:
             and_clauses.append(
-                {
-                    "$expr": {
-                        "$gte": [
-                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
-                            min_experience_years,
-                        ]
-                    }
-                }
+                {"country": {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}}
             )
+        
+        # Skills filter (if provided) - Modified to require ALL skills (AND logic)
+        if skills and len(skills) > 0:
+            expanded_skills = expand(skills, SKILL_VARIANTS)
+            
+            # For each skill, create a condition that requires it to be present
+            # either in skills.skillName OR in keywords
+            skill_conditions = []
+            for skill in expanded_skills:
+                skill_conditions.append({
+                    "$or": [
+                        {"skills.skillName": skill},
+                        {"keywords": skill}
+                    ]
+                })
+            
+            # Add all skill conditions to the AND clauses (requiring all skills)
+            and_clauses.extend(skill_conditions)
+        
+        # Job title filter (if provided)
+        if job_titles and len(job_titles) > 0:
+            expanded_titles = expand(job_titles, TITLE_VARIANTS)
+            and_clauses.append(
+                {"jobExperiences.title": {"$in": expanded_titles}}
+            )
+        
+        # Experience filter (minimum years)
+        if isinstance(min_experience_years, int) and min_experience_years > 0:
+            # Create an aggregation expression to sum all job durations
+            and_clauses.append({
+                "$expr": {
+                    "$gte": [
+                        # Sum all job experience durations, handling possible missing or invalid values
+                        {
+                            "$sum": {
+                                "$map": {
+                                    "input": {
+                                        "$ifNull": ["$jobExperiences", []]
+                                    },
+                                    "as": "job",
+                                    "in": {
+                                        "$convert": {
+                                            "input": {"$ifNull": ["$$job.duration", "0"]},
+                                            "to": "double",
+                                            "onError": 0,
+                                            "onNull": 0
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        min_experience_years
+                    ]
+                }
+            })
+        
+        # Experience filter (maximum years, if provided)
+        if isinstance(max_experience_years, int) and max_experience_years > 0:
+            and_clauses.append({
+                "$expr": {
+                    "$lte": [
+                        # Sum all job experience durations, handling possible missing or invalid values
+                        {
+                            "$sum": {
+                                "$map": {
+                                    "input": {
+                                        "$ifNull": ["$jobExperiences", []]
+                                    },
+                                    "as": "job",
+                                    "in": {
+                                        "$convert": {
+                                            "input": {"$ifNull": ["$$job.duration", "0"]},
+                                            "to": "double",
+                                            "onError": 0,
+                                            "onNull": 0
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        max_experience_years
+                    ]
+                }
+            })
+        
+        # Combine all AND clauses
         if and_clauses:
             mongo_q["$and"] = and_clauses
+        
+        # Execute the query
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
+            if debug_mode:
+                print(f"MongoDB Query: {json.dumps(mongo_q, indent=2)}")
+            
+            # Find candidates matching the criteria
             candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
+        
+        # If no candidates found, return empty results
+        if not candidates:
+            return {
+                "message": "No resumes match the criteria.",
+                "results_count": 0,
+                "results": [],
+                "completed_at": datetime.utcnow().isoformat(),
+            }
+        
+        # Use LLM to score and rank candidates
         best_ids = score_resumes(query, candidates)
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
+        
+        # Return results
         return {
             "message": f"{len(best_resumes)} resumes after scoring.",
             "results_count": len(best_resumes),
@@ -221,7 +312,6 @@ def query_db(
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
         return {"error": str(exc)}
-
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
     """Send a plain text email using SMTP_USER / SMTP_PASS from secrets.toml."""

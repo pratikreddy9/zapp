@@ -179,48 +179,116 @@ def query_db(
     skills: Optional[List[str]] = None,
     top_k: int = TOP_K_DEFAULT,
 ) -> Dict[str, Any]:
-    """Filter MongoDB resumes and return top 10 matches."""
+    """Filter MongoDB resumes and return top matches using a two-stage process."""
     try:
+        # STAGE 1: Get initial candidates from MongoDB with basic filtering
+        # This casts a wider net to find potential matches
         mongo_q: Dict[str, Any] = {}
+        
+        # Country filter (if provided)
         if country:
             mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
-        if skills:
-            expanded = expand(skills, SKILL_VARIANTS)
+        
+        # Skills filter - using OR logic to cast a wider net
+        if skills and len(skills) > 0:
+            expanded_skills = expand(skills, SKILL_VARIANTS)
             mongo_q["$or"] = [
-                {"skills.skillName": {"$in": expanded}},
-                {"keywords": {"$in": expanded}},
+                {"skills.skillName": {"$in": expanded_skills}},
+                {"keywords": {"$in": expanded_skills}}
             ]
-        and_clauses = []
-        if job_titles:
-            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
-        if isinstance(min_experience_years, int) and min_experience_years > 0:
-            and_clauses.append(
-                {
-                    "$expr": {
-                        "$gte": [
-                            {"$toDouble": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
-                            min_experience_years,
-                        ]
-                    }
-                }
-            )
-        if and_clauses:
-            mongo_q["$and"] = and_clauses
+        
+        # Job titles filter - using OR logic with the initial MongoDB query
+        if job_titles and len(job_titles) > 0:
+            expanded_titles = expand(job_titles, TITLE_VARIANTS)
+            if "$or" in mongo_q:
+                # If we already have skills in $or, add job titles as another condition
+                mongo_q["$or"].append({"jobExperiences.title": {"$in": expanded_titles}})
+            else:
+                # Otherwise create a new $or for job titles
+                mongo_q["$or"] = [{"jobExperiences.title": {"$in": expanded_titles}}]
+        
+        # Get initial candidates from MongoDB
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
-            candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
-        best_ids = score_resumes(query, candidates)
+            if debug_mode:
+                print(f"MongoDB Query: {json.dumps(mongo_q, indent=2)}")
+            
+            # Get a larger initial candidate pool to let the LLM select from
+            candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(50))
+        
+        # STAGE 2: Use LLM to strictly filter and score candidates
+        # This ensures candidates meet ALL criteria, not just some
+        
+        # If no candidates found in initial search, return empty results
+        if not candidates:
+            return {
+                "message": "No resumes match the criteria.",
+                "results_count": 0,
+                "results": [],
+                "completed_at": datetime.utcnow().isoformat(),
+            }
+        
+        # Create a prompt that strictly enforces ALL criteria
+        system_prompt = f"""
+        You are a strict resume evaluator. Your task is to identify candidates 
+        that meet ALL of the following criteria from the query:
+        
+        QUERY: {query}
+        
+        Criteria to enforce STRICTLY:
+        1. Job Title: Must have held a job title of "software developer" or very 
+           close variants like "software engineer". Having skills is NOT enough.
+        
+        2. Experience: Must have at least {min_experience_years if min_experience_years else "the required"} 
+           years of experience specifically in developer roles.
+        
+        3. Skills: Must have ALL the specific skills mentioned in the query.
+        
+        4. Location: Must be in {country if country else "the specified location"}.
+        
+        Return ONLY resumeIds of candidates who meet ALL criteria. It's better to 
+        return fewer excellent matches than many poor matches.
+        
+        Format your response as JSON:
+        {{
+          "top_resume_ids": [...], 
+          "reasoning": "brief explanation of why these candidates match"
+        }}
+        """
+        
+        # Use LLM to evaluate candidates against strict criteria
+        chat = _openai_client.chat.completions.create(
+            model=EVAL_MODEL_NAME,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Candidates: {json.dumps(candidates)}"},
+            ],
+        )
+        
+        # Parse LLM response
+        try:
+            content = json.loads(chat.choices[0].message.content)
+            best_ids = content.get("top_resume_ids", [])
+            reasoning = content.get("reasoning", "")
+        except Exception as e:
+            return {"error": f"Error parsing LLM response: {str(e)}"}
+        
+        # Get the best candidates using the IDs from the LLM
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
+        
         return {
-            "message": f"{len(best_resumes)} resumes after scoring.",
+            "message": f"Found {len(best_resumes)} resumes that meet ALL criteria out of {len(candidates)} initial matches.",
             "results_count": len(best_resumes),
             "results": best_resumes,
+            "reasoning": reasoning,
             "completed_at": datetime.utcnow().isoformat(),
         }
     except PyMongoError as err:
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
         return {"error": str(exc)}
+
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:

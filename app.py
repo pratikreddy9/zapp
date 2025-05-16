@@ -154,18 +154,11 @@ COUNTRY_EQUIV = {
     "united arab emirates": ["united arab emirates", "uae"],
 }
 SKILL_VARIANTS = {
-    "sql": ["sql", "mysql", "microsoft sql server"],
     "javascript": ["javascript", "js", "java script"],
     "c#": ["c#", "c sharp", "csharp"],
     "html": ["html", "hypertext markup language"],
 }
 TITLE_VARIANTS = {
-    "software developer": [
-        "software developer",
-        "software dev",
-        "softwaredeveloper",
-        "software engineer",
-    ],
     "backend developer": [
         "backend developer",
         "backend dev",

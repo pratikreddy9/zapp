@@ -39,7 +39,8 @@ MONGO_CFG = {
 }
 MODEL_NAME = "gpt-4o"
 EVAL_MODEL_NAME = "gpt-4o"
-TOP_K_DEFAULT = 50
+TOP_K_DEFAULT = 20
+
 DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 

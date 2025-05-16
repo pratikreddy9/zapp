@@ -494,7 +494,7 @@ def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
 def display_resume_grid(resumes, container=None):
-    """Display resumes in a 3x3 grid layout with styled cards."""
+    """Display resumes in a 3x3 grid layout with styled cards, including both skills and keywords."""
     target = container if container else st
     
     if not resumes:
@@ -556,6 +556,16 @@ def display_resume_grid(resumes, container=None):
         font-size: 12px;
         font-weight: 500;
     }
+    .keyword-tag {
+        display: inline-block;
+        background-color: #fff8e1; 
+        color: #ff8f00;
+        border-radius: 12px;
+        padding: 3px 10px;
+        margin: 3px;
+        font-size: 12px;
+        font-weight: 500;
+    }
     .job-matches {
         margin-top: 8px;
         padding: 4px 10px;
@@ -590,11 +600,24 @@ def display_resume_grid(resumes, container=None):
                 email = resume.get("email", "")
                 phone = resume.get("contactNo", "")
                 location = resume.get("location", "")
-                resume_id = resume.get("resumeId", "")  # Extract resumeId for job matching
+                resume_id = resume.get("resumeId", "")
                 
                 # Get experience and skills
                 experience = resume.get("experience", [])
+                
+                # Handle skills - normalize from MongoDB format if needed
                 skills = resume.get("skills", [])
+                skill_names = []
+                
+                if isinstance(skills, list):
+                    for skill in skills:
+                        if isinstance(skill, dict) and "skillName" in skill:
+                            skill_names.append(skill["skillName"])
+                        elif isinstance(skill, str):
+                            skill_names.append(skill)
+                            
+                # Get keywords
+                keywords = resume.get("keywords", [])
                 
                 # Get job matches if available
                 job_matches = resume.get("jobsMatched")
@@ -622,11 +645,18 @@ def display_resume_grid(resumes, container=None):
                         for exp in experience[:3]:  # Limit to 3 experiences
                             html += f'<div class="resume-experience">• {exp}</div>'
                     
-                    # Add skills section
-                    if skills:
+                    # Add skills section with blue tags
+                    if skill_names:
                         html += f'<div class="resume-section-title">Skills</div><div>'
-                        for skill in skills[:7]:  # Limit to 7 skills
+                        for skill in skill_names[:7]:  # Limit to 7 skills
                             html += f'<span class="skill-tag">{skill}</span>'
+                        html += '</div>'
+                    
+                    # Add keywords section with orange tags - NEWLY ADDED
+                    if keywords:
+                        html += f'<div class="resume-section-title">Keywords</div><div>'
+                        for keyword in keywords[:7]:  # Limit to 7 keywords
+                            html += f'<span class="keyword-tag">{keyword}</span>'
                         html += '</div>'
                     
                     # Show resume ID in debug mode

@@ -247,13 +247,20 @@ def query_db(
             expanded_titles = expand(job_titles, TITLE_VARIANTS)
             and_clauses.append({"jobExperiences": {"$elemMatch": {"title": {"$in": expanded_titles}}}})
         
-        # Experience years filter
+        # Experience years filter - modified to handle decimal values
         if isinstance(min_experience_years, int) and min_experience_years > 0:
             and_clauses.append(
                 {
                     "$expr": {
                         "$gte": [
-                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
+                            {
+                                "$toDouble": {
+                                    "$ifNull": [
+                                        {"$first": "$jobExperiences.duration"}, 
+                                        "0"
+                                    ]
+                                }
+                            },
                             min_experience_years,
                         ]
                     }

@@ -43,6 +43,53 @@ TOP_K_DEFAULT = 50
 DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 
+# ── UNIVERSAL EMAIL FORMATTER ──────────────────────────────────────────
+def reformat_email_body(llm_output, intro="", conclusion=""):
+    """
+    Formats LLM output (list of dicts, dict, or string) as neat plain text for emails.
+    - llm_output: string, dict, or list of dicts (parsed if possible)
+    - intro, conclusion: optional strings to prepend/append
+    """
+    import json
+
+    lines = []
+    # Try parsing JSON if LLM gave a JSON string
+    if isinstance(llm_output, str):
+        llm_output = llm_output.strip()
+        # Try to parse if JSON-like
+        try:
+            parsed = json.loads(llm_output)
+            llm_output = parsed
+        except Exception:
+            pass
+
+    if intro:
+        lines.append(intro.strip() + "\n")
+
+    # Handle list of dicts (resumes, counts, etc)
+    if isinstance(llm_output, list) and llm_output and isinstance(llm_output[0], dict):
+        for i, item in enumerate(llm_output, 1):
+            lines.append(f"Item {i}")
+            lines.append("-" * 30)
+            for k, v in item.items():
+                lines.append(f"{k.capitalize():<15}: {v}")
+            lines.append("")
+    # Handle dict (summary data)
+    elif isinstance(llm_output, dict):
+        for k, v in llm_output.items():
+            lines.append(f"{k.capitalize():<20}: {v}")
+        lines.append("")
+    # Handle string (or anything else)
+    else:
+        lines.append(str(llm_output).strip())
+        lines.append("")
+
+    if conclusion:
+        lines.append(conclusion.strip())
+    lines.append("\nSent by ZappBot")
+
+    return "\n".join(lines)
+
 # ── MONGO ──────────────────────────────────────────────────────────────
 def get_mongo_client() -> MongoClient:
     return MongoClient(**MONGO_CFG)
@@ -177,11 +224,12 @@ def query_db(
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
-    """Send an HTML email using SMTP_USER / SMTP_PASS from secrets.toml."""
+    """Send a plain text email using SMTP_USER / SMTP_PASS from secrets.toml."""
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"], msg["From"], msg["To"] = subject, SMTP_USER, to
-        msg.attach(MIMEText(body, "html"))
+        # Plain text email only
+        msg.attach(MIMEText(body, "plain"))
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx) as srv:
             srv.login(SMTP_USER, SMTP_PASS)
@@ -528,41 +576,40 @@ agent_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            """You are a helpful HR assistant named ZappBot. Use the `query_db` tool whenever the
-            user asks for candidates or filtering. Otherwise, answer normally.
-            
-            # Resume Formatting
-            When displaying resume results, always format them consistently as follows:
-            
-            First, provide a brief introduction line like:
-            "Here are some developers in [location] with [criteria]:"
-            
-            Then, list each candidate in this exact format:
-            
-            [Full Name]
-            
-            Email: [email]
-            Contact No: [phone]
-            Location: [location]
-            Experience: [experience1], [experience2], [experience3]
-            Skills: [skill1], [skill2], [skill3], [skill4]
-            
-            Maintain this precise format with consistent spacing and no bullet points or numbering,
-            as it allows our UI to extract and display the resumes in a grid layout.
-            
-            After listing all candidates, include a brief concluding sentence like:
-            "These candidates have diverse experiences and skills that may suit your needs."
-            
-            # ResumeIDs
-            When a user asks about a specific candidate by name, use the `get_resume_id_by_name` tool
-            to look up their resumeId. Then use this resumeId with the `get_job_match_counts` tool
-            to find how many jobs they are matched to.
-            
-            # Email and Job Matches
-            If the user asks to email or send these results, call the `send_email` tool.
-            
-            If the user wants to check how many jobs a resume is matched to, use the `get_job_match_counts` tool
-            with the appropriate resumeIds.
+            """
+You are a helpful HR assistant named ZappBot.
+
+# Resume Formatting
+When displaying resume results, always format them consistently as follows:
+
+First, provide a brief introduction line like:
+"Here are some developers in [location] with [criteria]:"
+
+Then, list each candidate in this exact format:
+
+[Full Name]
+
+Email: [email]
+Contact No: [phone]
+Location: [location]
+Experience: [experience1], [experience2], [experience3]
+Skills: [skill1], [skill2], [skill3], [skill4]
+
+Maintain this precise format with consistent spacing and no bullet points or numbering, as it allows our UI to extract and display the resumes in a grid layout.
+
+After listing all candidates, include a brief concluding sentence like:
+"These candidates have diverse experiences and skills that may suit your needs."
+
+- **Never join multiple candidates or items on one line, and never use commas or paragraphs to join candidates.**
+- **Always keep each candidate in the exact block and field order above, with a blank line between candidates.**
+
+# ResumeIDs and Tools
+
+When a user asks about a specific candidate by name, use the `get_resume_id_by_name` tool to look up their resumeId. Then use this resumeId with the `get_job_match_counts` tool to find how many jobs they are matched to.
+
+If the user asks to email or send these results, call the `send_email` tool.
+
+If the user wants to check how many jobs a resume is matched to, use the `get_job_match_counts` tool with the appropriate resumeIds.
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -835,48 +882,12 @@ with chat_container:
                     if resp['processed']['resumes']:
                         if st.button(f"📧 Email Results", key=f"email_btn_{i}"):
                             try:
-                                # Generate HTML email with resume cards
-                                html_body = f"""
-                                <h2>Resume Search Results</h2>
-                                <p><strong>Search Query:</strong> {resp['query']}</p>
-                                <p>{resp['processed']['intro_text']}</p>
-                                <div style="margin: 20px 0;">
-                                """
-                                
-                                # Add each resume to the email
-                                for resume in resp['processed']['resumes']:
-                                    name = resume.get("name", "Unknown")
-                                    email = resume.get("email", "")
-                                    phone = resume.get("contactNo", "")
-                                    location = resume.get("location", "")
-                                    experience = ", ".join(resume.get("experience", []))
-                                    skills = ", ".join(resume.get("skills", []))
-                                    job_matches = resume.get("jobsMatched")
-                                    
-                                    html_body += f"""
-                                    <div style="border: 1px solid #e1e4e8; border-radius: 8px; padding: 15px; margin-bottom: 15px;">
-                                        <h3 style="margin-top: 0;">{name}</h3>
-                                        <p>📍 {location}</p>
-                                        <p>📧 {email}</p>
-                                        <p>📱 {phone}</p>
-                                        <p><strong>Experience:</strong> {experience}</p>
-                                        <p><strong>Skills:</strong> {skills}</p>
-                                    """
-                                    
-                                    if job_matches is not None:
-                                        html_body += f"""
-                                        <p><strong>Job Matches:</strong> {job_matches}</p>
-                                        """
-                                        
-                                    html_body += """
-                                    </div>
-                                    """
-                                
-                                html_body += f"""
-                                </div>
-                                <p>{resp['processed'].get('conclusion_text', '')}</p>
-                                <p>Sent by ZappBot</p>
-                                """
+                                # Universal formatted plain text for email (uses LLM/chat output)
+                                plain_text_body = reformat_email_body(
+                                    llm_output=resp['processed']['resumes'],
+                                    intro=resp['processed']['intro_text'],
+                                    conclusion=resp['processed'].get('conclusion_text', '')
+                                )
                                 
                                 # Get recipient email
                                 recipient = default_recipient
@@ -887,7 +898,7 @@ with chat_container:
                                     result = send_email(
                                         to=recipient,
                                         subject=f"ZappBot Results: {resp['query']}",
-                                        body=html_body
+                                        body=plain_text_body
                                     )
                                     st.success(f"Email sent to {recipient}")
                             except Exception as e:

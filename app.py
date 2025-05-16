@@ -1,5 +1,5 @@
 """
-ZappBot: Resume-filtering chatbot with optimized display + email sender + job match counts
+ZappBot: Resume‑filtering chatbot with optimized display + email sender + job match counts
 LangChain 0.3.25 • OpenAI 1.78.1 • Streamlit 1.34+
 """
 
@@ -39,7 +39,7 @@ MONGO_CFG = {
 }
 MODEL_NAME = "gpt-4o"
 EVAL_MODEL_NAME = "gpt-4o"
-TOP_K_DEFAULT = 20
+TOP_K_DEFAULT = 50
 DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 
@@ -145,7 +145,7 @@ def expand(values: List[str], table: Dict[str, List[str]]) -> List[str]:
         out.add(v)
     return list(out)
 
-# ── LLM-BASED RESUME SCORER ────────────────────────────────────────────
+# ── LLM‑BASED RESUME SCORER ────────────────────────────────────────────
 _openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 EVALUATOR_PROMPT = """
 You are a resume scoring assistant. Return only the 10 best resumeIds.
@@ -168,10 +168,10 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     content = json.loads(chat.choices[0].message.content)
     return content.get("top_resume_ids", [])
 
-# ────────────────  REPLACE YOUR OLD query_db WITH THIS COMPLETE VERSION  ────────────────
+# ── TOOLS ─────────────────────────────────────────────────────────────
 @tool
 def query_db(
-    query: str = "",
+    query: str,
     country: Optional[str] = None,
     min_experience_years: Optional[int] = None,
     max_experience_years: Optional[int] = None,
@@ -179,93 +179,48 @@ def query_db(
     skills: Optional[List[str]] = None,
     top_k: int = TOP_K_DEFAULT,
 ) -> Dict[str, Any]:
-    """
-    Filter MongoDB resumes so that **every requested skill (or any of its variants) is present**,
-    the candidate meets the min-years experience, and (optionally) holds one of the requested titles.
-    Results are then re-ranked by the LLM scorer.
-    """
+    """Filter MongoDB resumes and return top 10 matches."""
     try:
-        import re, json                                         # ensure re is in scope
         mongo_q: Dict[str, Any] = {}
-
-        # ── COUNTRY FILTER ──
         if country:
-            mongo_q["country"] = {
-                "$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])
-            }
-
-        # ── SKILL “ALL-BRICKS” FILTER ──
-        and_clauses: List[Dict[str, Any]] = []
+            mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
         if skills:
-            for wanted in skills:
-                variants = SKILL_VARIANTS.get(wanted.strip().lower(), [wanted])
-                # build an OR clause for this one skill (variants across skills/keywords fields)
-                var_clauses = []
-                for v in variants:
-                    regex = {"$regex": f"^{re.escape(v)}$", "$options": "i"}
-                    var_clauses.append({"skills.skillName": regex})
-                    var_clauses.append({"keywords": regex})
-                and_clauses.append({"$or": var_clauses})      # ← each skill must match
-
-        # ── JOB-TITLE FILTER (optional) ──
+            expanded = expand(skills, SKILL_VARIANTS)
+            mongo_q["$or"] = [
+                {"skills.skillName": {"$in": expanded}},
+                {"keywords": {"$in": expanded}},
+            ]
+        and_clauses = []
         if job_titles:
-            and_clauses.append({
-                "jobExperiences.title": {
-                    "$in": expand(job_titles, TITLE_VARIANTS)
-                }
-            })
-
-        # ── MIN-YEARS EXPERIENCE FILTER ──
+            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
         if isinstance(min_experience_years, int) and min_experience_years > 0:
-            and_clauses.append({
-                "$expr": {
-                    "$gte": [
-                        {
-                            "$ifNull": [
-                                "$totalYearsExp",
-                                {  # fallback: first jobExperiences.duration as int
-                                    "$toInt": {
-                                        "$ifNull": [
-                                            {"$first": "$jobExperiences.duration"},
-                                            0
-                                        ]
-                                    }
-                                }
-                            ]
-                        },
-                        min_experience_years
-                    ]
+            and_clauses.append(
+                {
+                    "$expr": {
+                        "$gte": [
+                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
+                            min_experience_years,
+                        ]
+                    }
                 }
-            })
-
-        # Glue all AND clauses
+            )
         if and_clauses:
             mongo_q["$and"] = and_clauses
-
-        # ── DB FETCH ──
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
-            candidates = list(
-                coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k)
-            )
-
-        # ── LLM RE-RANK ──  (pass skills list so scorer knows they matter)
-        best_ids = score_resumes(query, candidates, extra_terms=skills or [])
+            candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
+        best_ids = score_resumes(query, candidates)
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
-
         return {
             "message": f"{len(best_resumes)} resumes after scoring.",
             "results_count": len(best_resumes),
             "results": best_resumes,
             "completed_at": datetime.utcnow().isoformat(),
         }
-
     except PyMongoError as err:
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
         return {"error": str(exc)}
-# ─────────────────────────────────────────────────────────────────────────────────────────
-
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
@@ -427,9 +382,7 @@ def process_response(text):
                 "contactNo": contact.strip(),
                 "location": location.strip(),
                 "experience": exp_list,
-                "skills": skill_list,
-                # keywords not present in chat output; keep placeholder
-                "keywords": skill_list
+                "skills": skill_list
             })
         
         return {
@@ -460,44 +413,27 @@ def attach_hidden_resume_ids(resume_list: List[Dict[str, Any]]) -> None:
         coll = client[DB_NAME][COLL_NAME]
         for res in resume_list:
             if "resumeId" in res and res["resumeId"]:
-                # Also fetch keywords from DB if missing
-                if not res.get("keywords"):
-                    doc_kw = coll.find_one({"resumeId": res["resumeId"]}, {"_id": 0, "keywords": 1})
-                    if doc_kw and doc_kw.get("keywords"):
-                        res["keywords"] = doc_kw["keywords"]
                 continue
             email = res.get("email")
             phone = res.get("contactNo")
             if email and phone:
                 doc = coll.find_one(
                     {"email": email, "contactNo": phone},
-                    {"_id": 0, "resumeId": 1, "keywords": 1},
+                    {"_id": 0, "resumeId": 1},
                 )
                 if doc and doc.get("resumeId"):
                     res["resumeId"] = doc["resumeId"]
-                    if doc.get("keywords"):
-                        res["keywords"] = doc["keywords"]
 
 # ── DISPLAY RESUME GRID ───────────────────────────────────────────────
-# ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓  FIX START  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
-
-def display_resume_grid(resumes, query_text: str = "", container=None):
-    """
-    Display resumes in a 3-column grid.
-    • Shows both skills and keywords lists (deduplicated).
-    • Any skill/keyword that also appears in the user’s query is highlighted
-      with a distinct colour.
-    """
+def display_resume_grid(resumes, container=None):
+    """Display resumes in a 3x3 grid layout with styled cards."""
     target = container if container else st
     
     if not resumes:
         target.warning("No resumes found matching the criteria.")
         return
     
-    # ── parse query tokens for later highlight ──
-    query_tokens = set(re.findall(r'[A-Za-z0-9#+\-\.]+', query_text.lower()))
-    
-    # ── Styles ──
+    # Custom CSS for the resume cards
     target.markdown("""
     <style>
     .resume-card {
@@ -514,12 +450,34 @@ def display_resume_grid(resumes, query_text: str = "", container=None):
         transform: translateY(-3px);
         box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
-    .resume-name { font-weight: bold; font-size: 18px; margin-bottom: 8px; color: #24292e; }
-    .resume-location { color: #586069; font-size: 14px; margin-bottom: 10px; }
-    .resume-contact { margin-bottom: 8px; font-size: 14px; color: #444d56; }
-    .resume-section-title { font-weight: 600; margin-top: 12px; margin-bottom: 6px; font-size: 15px; color: #24292e; }
-    .resume-experience { font-size: 14px; color: #444d56; margin-bottom: 4px; }
-    
+    .resume-name {
+        font-weight: bold;
+        font-size: 18px;
+        margin-bottom: 8px;
+        color: #24292e;
+    }
+    .resume-location {
+        color: #586069;
+        font-size: 14px;
+        margin-bottom: 10px;
+    }
+    .resume-contact {
+        margin-bottom: 8px;
+        font-size: 14px;
+        color: #444d56;
+    }
+    .resume-section-title {
+        font-weight: 600;
+        margin-top: 12px;
+        margin-bottom: 6px;
+        font-size: 15px;
+        color: #24292e;
+    }
+    .resume-experience {
+        font-size: 14px;
+        color: #444d56;
+        margin-bottom: 4px;
+    }
     .skill-tag {
         display: inline-block;
         background-color: #f1f8ff;
@@ -530,11 +488,6 @@ def display_resume_grid(resumes, query_text: str = "", container=None):
         font-size: 12px;
         font-weight: 500;
     }
-    .skill-match {               /* highlighted matching skill/keyword */
-        background-color: #FFE0B2 !important;
-        color: #D84315 !important;
-    }
-    
     .job-matches {
         margin-top: 8px;
         padding: 4px 10px;
@@ -544,77 +497,76 @@ def display_resume_grid(resumes, query_text: str = "", container=None):
         font-size: 14px;
         color: #0D47A1;
     }
-    .resume-id { font-size: 10px; color: #6a737d; margin-top: 8px; word-break: break-all; }
+    .resume-id {
+        font-size: 10px;
+        color: #6a737d;
+        margin-top: 8px;
+        word-break: break-all;
+    }
     </style>
     """, unsafe_allow_html=True)
     
     # Create a 3-column grid
     num_resumes = len(resumes)
-    rows = (num_resumes + 2) // 3  # Ceiling
+    rows = (num_resumes + 2) // 3  # Ceiling division for number of rows
     
     for row in range(rows):
         cols = target.columns(3)
         for col in range(3):
             idx = row * 3 + col
-            if idx >= num_resumes:
-                continue
-            
-            resume = resumes[idx]
-            
-            name = resume.get("name", "Unknown")
-            email = resume.get("email", "")
-            phone = resume.get("contactNo", "")
-            location = resume.get("location", "")
-            resume_id = resume.get("resumeId", "")
-            
-            experience = resume.get("experience", [])
-            skills = resume.get("skills", [])
-            keywords = resume.get("keywords", [])
-            
-            # Merge skills + keywords, preserve order & dedupe
-            combined = []
-            seen = set()
-            for lst in (skills, keywords):
-                for s in lst:
-                    sl = s.lower()
-                    if sl not in seen:
-                        combined.append(s.strip())
-                        seen.add(sl)
-            
-            # Assign job-match count if present
-            job_matches = resume.get("jobsMatched")
-            
-            with cols[col]:
-                html = f"""
-                <div class="resume-card" {"data-resume-id='"+resume_id+"'" if resume_id else ""}>
-                    <div class="resume-name">{name}</div>
-                    <div class="resume-location">📍 {location}</div>
-                    <div class="resume-contact">📧 {email}</div>
-                    <div class="resume-contact">📱 {phone}</div>
-                """
+            if idx < num_resumes:
+                resume = resumes[idx]
                 
-                if job_matches is not None:
-                    html += f'<div class="job-matches">🔗 Matched to {job_matches} jobs</div>'
+                # Extract resume data
+                name = resume.get("name", "Unknown")
+                email = resume.get("email", "")
+                phone = resume.get("contactNo", "")
+                location = resume.get("location", "")
+                resume_id = resume.get("resumeId", "")  # Extract resumeId for job matching
                 
-                if experience:
-                    html += '<div class="resume-section-title">Experience</div>'
-                    for exp in experience[:3]:
-                        html += f'<div class="resume-experience">• {exp}</div>'
+                # Get experience and skills
+                experience = resume.get("experience", [])
+                skills = resume.get("skills", [])
                 
-                if combined:
-                    html += '<div class="resume-section-title">Skills & Keywords</div><div>'
-                    for sk in combined[:12]:
-                        class_extra = " skill-match" if sk.lower() in query_tokens else ""
-                        html += f'<span class="skill-tag{class_extra}">{sk}</span>'
+                # Get job matches if available
+                job_matches = resume.get("jobsMatched")
+                
+                with cols[col]:
+                    html = f"""
+                    <div class="resume-card">
+                        <div class="resume-name">{name}</div>
+                        <div class="resume-location">📍 {location}</div>
+                        <div class="resume-contact">📧 {email}</div>
+                        <div class="resume-contact">📱 {phone}</div>
+                    """
+                    
+                    # Add resumeId as data attribute (hidden but accessible)
+                    if resume_id:
+                        html = html.replace('<div class="resume-card">', f'<div class="resume-card" data-resume-id="{resume_id}">')
+                    
+                    # Add job matches if available
+                    if job_matches is not None:
+                        html += f'<div class="job-matches">🔗 Matched to {job_matches} jobs</div>'
+                    
+                    # Add experience section
+                    if experience:
+                        html += f'<div class="resume-section-title">Experience</div>'
+                        for exp in experience[:3]:  # Limit to 3 experiences
+                            html += f'<div class="resume-experience">• {exp}</div>'
+                    
+                    # Add skills section
+                    if skills:
+                        html += f'<div class="resume-section-title">Skills</div><div>'
+                        for skill in skills[:7]:  # Limit to 7 skills
+                            html += f'<span class="skill-tag">{skill}</span>'
+                        html += '</div>'
+                    
+                    # Show resume ID in debug mode
+                    if debug_mode and resume_id:
+                        html += f'<div class="resume-id">ID: {resume_id}</div>'
+                    
                     html += '</div>'
-                
-                if debug_mode and resume_id:
-                    html += f'<div class="resume-id">ID: {resume_id}</div>'
-                
-                html += '</div>'
-                st.markdown(html, unsafe_allow_html=True)
-
-# ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑  FIX END  ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+                    st.markdown(html, unsafe_allow_html=True)
 
 # ── AGENT + MEMORY ─────────────────────────────────────────────────────
 llm = ChatOpenAI(model=MODEL_NAME, api_key=OPENAI_API_KEY, temperature=0)
@@ -653,11 +605,11 @@ After listing all candidates, include a brief concluding sentence like:
 
 # ResumeIDs and Tools
 
-When a user asks about a specific candidate by name, use the get_resume_id_by_name tool to look up their resumeId. Then use this resumeId with the get_job_match_counts tool to find how many jobs they are matched to.
+When a user asks about a specific candidate by name, use the `get_resume_id_by_name` tool to look up their resumeId. Then use this resumeId with the `get_job_match_counts` tool to find how many jobs they are matched to.
 
-If the user asks to email or send these results, call the send_email tool.
+If the user asks to email or send these results, call the `send_email` tool.
 
-If the user wants to check how many jobs a resume is matched to, use the get_job_match_counts tool with the appropriate resumeIds.
+If the user wants to check how many jobs a resume is matched to, use the `get_job_match_counts` tool with the appropriate resumeIds.
             """,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
@@ -712,13 +664,41 @@ st.markdown("""
         max-width: 1200px;
         margin: 0 auto;
     }
-    .header-container { display: flex; align-items: center; margin-bottom: 20px; }
-    .header-emoji { font-size: 36px; margin-right: 10px; }
-    .header-text { font-size: 24px; font-weight: 600; }
-    .resume-section { margin-top: 20px; padding: 15px; border-radius: 8px; background-color: #f8f9fa; border-left: 4px solid #0366d6; }
-    .resume-query { font-weight: 600; margin-bottom: 10px; color: #0366d6; }
-    .st-expander { border: none !important; box-shadow: none !important; }
-    .tool-section { background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+    .header-container {
+        display: flex;
+        align-items: center;
+        margin-bottom: 20px;
+    }
+    .header-emoji {
+        font-size: 36px;
+        margin-right: 10px;
+    }
+    .header-text {
+        font-size: 24px;
+        font-weight: 600;
+    }
+    .resume-section {
+        margin-top: 20px;
+        padding: 15px;
+        border-radius: 8px;
+        background-color: #f8f9fa;
+        border-left: 4px solid #0366d6;
+    }
+    .resume-query {
+        font-weight: 600;
+        margin-bottom: 10px;
+        color: #0366d6;
+    }
+    .st-expander {
+        border: none !important;
+        box-shadow: none !important;
+    }
+    .tool-section {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -740,9 +720,9 @@ with st.sidebar:
     st.subheader("Job Matching")
     st.markdown("""
     To check job matches, ask about a specific candidate:
-    
-How many jobs is [Candidate Name] matched to?
-
+    ```
+    How many jobs is [Candidate Name] matched to?
+    ```
     """)
     
     if st.button("Clear Chat History"):
@@ -876,7 +856,7 @@ with chat_container:
             with st.expander(f"Search {i+1}: {resp['query']}", expanded=(i == len(resume_responses)-1)):
                 st.markdown(f"<div class='resume-query'>{resp['processed']['intro_text']}</div>", unsafe_allow_html=True)
                 
-                # Make sure resumes have resumeIds & keywords
+                # Make sure resumes have resumeIds
                 attach_hidden_resume_ids(resp['processed']['resumes'])
                 
                 # Store resumeIds in session state
@@ -891,25 +871,30 @@ with chat_container:
                         if resume_id and resume_id in st.session_state.job_match_data:
                             resume["jobsMatched"] = st.session_state.job_match_data[resume_id]
                 
-                # Display the resume grid (query passed for highlight)
-                display_resume_grid(resp['processed']['resumes'], query_text=resp['query'])
+                # Display the resume grid
+                display_resume_grid(resp['processed']['resumes'])
                 
-                # Email & job-match buttons
+                # Add a row with email button and job match button
                 cols = st.columns([2, 1, 1])
                 
+                # Email button
                 with cols[1]:
                     if resp['processed']['resumes']:
                         if st.button(f"📧 Email Results", key=f"email_btn_{i}"):
                             try:
+                                # Universal formatted plain text for email (uses LLM/chat output)
                                 plain_text_body = reformat_email_body(
                                     llm_output=resp['processed']['resumes'],
                                     intro=resp['processed']['intro_text'],
                                     conclusion=resp['processed'].get('conclusion_text', '')
                                 )
+                                
+                                # Get recipient email
                                 recipient = default_recipient
                                 if not recipient:
                                     st.error("Please set a default email recipient in the sidebar.")
                                 else:
+                                    # Send the email
                                     result = send_email(
                                         to=recipient,
                                         subject=f"ZappBot Results: {resp['query']}",
@@ -919,18 +904,27 @@ with chat_container:
                             except Exception as e:
                                 st.error(f"Failed to send email: {str(e)}")
                 
+                # Job Match button
                 with cols[2]:
                     if resp['processed']['resumes']:
                         if st.button("🔍 Match Jobs", key=f"job_btn_{i}"):
                             try:
-                                resume_ids = [r.get("resumeId") for r in resp['processed']['resumes'] if r.get("resumeId")]
+                                # Extract resume IDs
+                                resume_ids = []
+                                for resume in resp['processed']['resumes']:
+                                    resume_id = resume.get("resumeId")
+                                    if resume_id:
+                                        resume_ids.append(resume_id)
+                                
                                 if resume_ids:
+                                    # Call get_job_match_counts
                                     result = get_job_match_counts(resume_ids)
                                     if "results" in result:
+                                        # Store job match data
                                         for item in result["results"]:
-                                            rid = item.get("resumeId")
-                                            if rid:
-                                                st.session_state.job_match_data[rid] = item.get("jobsMatched", 0)
+                                            resume_id = item.get("resumeId")
+                                            if resume_id:
+                                                st.session_state.job_match_data[resume_id] = item.get("jobsMatched", 0)
                                         st.success(f"Job match data updated for {len(resume_ids)} resumes")
                                         st.rerun()
                                     else:
@@ -940,10 +934,11 @@ with chat_container:
                             except Exception as e:
                                 st.error(f"Failed to get job matches: {str(e)}")
                 
+                # Display conclusion if available
                 if resp['processed'].get('conclusion_text'):
                     st.write(resp['processed']['conclusion_text'])
     
-    # Debug info
+    # Show debug info if enabled
     if debug_mode:
         with st.expander("Debug Information"):
             st.subheader("Memory Contents")
@@ -955,6 +950,7 @@ with chat_container:
             st.subheader("Processed Responses")
             for key, value in st.session_state.processed_responses.items():
                 if "full_text" in value:
+                    # Create a shorter version for display
                     shorter_value = {k: v for k, v in value.items() if k != "full_text"}
                     shorter_value["full_text_length"] = len(value["full_text"])
                     st.json({key: shorter_value})

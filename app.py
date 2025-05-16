@@ -168,7 +168,7 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     content = json.loads(chat.choices[0].message.content)
     return content.get("top_resume_ids", [])
 
-# ── TOOLS ─────────────────────────────────────────────────────────────
+# ────────────────  REPLACE YOUR OLD query_db WITH THIS COMPLETE VERSION  ────────────────
 @tool
 def query_db(
     query: str,
@@ -179,48 +179,93 @@ def query_db(
     skills: Optional[List[str]] = None,
     top_k: int = TOP_K_DEFAULT,
 ) -> Dict[str, Any]:
-    """Filter MongoDB resumes and return top 10 matches."""
+    """
+    Filter MongoDB resumes so that **every requested skill (or any of its variants) is present**,
+    the candidate meets the min-years experience, and (optionally) holds one of the requested titles.
+    Results are then re-ranked by the LLM scorer.
+    """
     try:
+        import re, json                                         # ensure re is in scope
         mongo_q: Dict[str, Any] = {}
+
+        # ── COUNTRY FILTER ──
         if country:
-            mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
+            mongo_q["country"] = {
+                "$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])
+            }
+
+        # ── SKILL “ALL-BRICKS” FILTER ──
+        and_clauses: List[Dict[str, Any]] = []
         if skills:
-            expanded = expand(skills, SKILL_VARIANTS)
-            mongo_q["$or"] = [
-                {"skills.skillName": {"$in": expanded}},
-                {"keywords": {"$in": expanded}},
-            ]
-        and_clauses = []
+            for wanted in skills:
+                variants = SKILL_VARIANTS.get(wanted.strip().lower(), [wanted])
+                # build an OR clause for this one skill (variants across skills/keywords fields)
+                var_clauses = []
+                for v in variants:
+                    regex = {"$regex": f"^{re.escape(v)}$", "$options": "i"}
+                    var_clauses.append({"skills.skillName": regex})
+                    var_clauses.append({"keywords": regex})
+                and_clauses.append({"$or": var_clauses})      # ← each skill must match
+
+        # ── JOB-TITLE FILTER (optional) ──
         if job_titles:
-            and_clauses.append({"jobExperiences.title": {"$in": expand(job_titles, TITLE_VARIANTS)}})
-        if isinstance(min_experience_years, int) and min_experience_years > 0:
-            and_clauses.append(
-                {
-                    "$expr": {
-                        "$gte": [
-                            {"$toInt": {"$ifNull": [{"$first": "$jobExperiences.duration"}, "0"]}},
-                            min_experience_years,
-                        ]
-                    }
+            and_clauses.append({
+                "jobExperiences.title": {
+                    "$in": expand(job_titles, TITLE_VARIANTS)
                 }
-            )
+            })
+
+        # ── MIN-YEARS EXPERIENCE FILTER ──
+        if isinstance(min_experience_years, int) and min_experience_years > 0:
+            and_clauses.append({
+                "$expr": {
+                    "$gte": [
+                        {
+                            "$ifNull": [
+                                "$totalYearsExp",
+                                {  # fallback: first jobExperiences.duration as int
+                                    "$toInt": {
+                                        "$ifNull": [
+                                            {"$first": "$jobExperiences.duration"},
+                                            0
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                        min_experience_years
+                    ]
+                }
+            })
+
+        # Glue all AND clauses
         if and_clauses:
             mongo_q["$and"] = and_clauses
+
+        # ── DB FETCH ──
         with get_mongo_client() as client:
             coll = client[DB_NAME][COLL_NAME]
-            candidates = list(coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k))
-        best_ids = score_resumes(query, candidates)
+            candidates = list(
+                coll.find(mongo_q, {"_id": 0, "embedding": 0}).limit(top_k)
+            )
+
+        # ── LLM RE-RANK ──  (pass skills list so scorer knows they matter)
+        best_ids = score_resumes(query, candidates, extra_terms=skills or [])
         best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
+
         return {
             "message": f"{len(best_resumes)} resumes after scoring.",
             "results_count": len(best_resumes),
             "results": best_resumes,
             "completed_at": datetime.utcnow().isoformat(),
         }
+
     except PyMongoError as err:
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
         return {"error": str(exc)}
+# ─────────────────────────────────────────────────────────────────────────────────────────
+
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:

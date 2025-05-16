@@ -169,99 +169,143 @@ def score_resumes(query: str, resumes: List[Dict[str, Any]]) -> List[str]:
     return content.get("top_resume_ids", [])
 
 # ── TOOLS ─────────────────────────────────────────────────────────────
-# ── TOOLS ─────────────────────────────────────────────────────────────
 @tool
 def query_db(
-    query: Optional[str] = None,
+    query: str,
     country: Optional[str] = None,
-    min_experience_years: Optional[float] = None,
-    max_experience_years: Optional[float] = None,   # still supported
+    min_experience_years: Optional[int] = None,
+    max_experience_years: Optional[int] = None,
     job_titles: Optional[List[str]] = None,
     skills: Optional[List[str]] = None,
     top_k: int = TOP_K_DEFAULT,
 ) -> Dict[str, Any]:
-    """
-    Return scored resumes that satisfy **ALL** user constraints:
-    • country  • total-experience range  • ALL requested skills  • ANY requested title
-    """
+    """Filter MongoDB resumes and return top matches in order of priority: job title first, then experience, then skills."""
     try:
-        # ---------- 1. broad DB filter (keep fast indexes) ----------
-        mongo_q: Dict[str, Any] = {}
-        if country:
-            mongo_q["country"] = {"$in": COUNTRY_EQUIV.get(country.strip().lower(), [country])}
-
-        # Pull only the fields we need
-        projection = {"_id": 0, "embedding": 0}
-
         with get_mongo_client() as client:
-            coll       = client[DB_NAME][COLL_NAME]
-            candidates = list(coll.find(mongo_q, projection).limit(top_k * 10))  # oversample
-
-        # ---------- 2. helper lambdas ----------
-        def total_experience(exp_list):
-            total = 0.0
-            if isinstance(exp_list, list):
-                for e in exp_list:
-                    try:
-                        total += float(e.get("duration", 0) or 0)
-                    except (ValueError, TypeError):
-                        continue
-            return total
-
-        def normalize_list(values):
-            return [str(v).lower().strip() for v in values if isinstance(v, str)]
-
-        # Pre-expand skill & title variants once
-        req_skill_groups  = [set(expand([s], SKILL_VARIANTS)) for s in (skills or [])]
-        req_title_variants = set(expand(job_titles or [], TITLE_VARIANTS))
-
-        # ---------- 3. strict Python filtering ----------
-        strict_hits = []
-        for res in candidates:
-
-            # --- experience filter ---
-            tot_exp = total_experience(res.get("jobExperiences", []))
-            if isinstance(min_experience_years, (int, float)) and tot_exp < min_experience_years:
-                continue
-            if isinstance(max_experience_years, (int, float)) and tot_exp > max_experience_years:
-                continue
-
-            # --- title filter (ANY) ---
-            if job_titles:
-                titles_in_resume = normalize_list(
-                    [e.get("title", "") for e in res.get("jobExperiences", [])]
-                )
-                if not any(t in req_title_variants for t in titles_in_resume):
-                    continue
-
-            # --- skills/keywords filter (ALL) ---
-            if skills:
-                resume_tokens = set(
-                    normalize_list([s.get("skillName") for s in res.get("skills", [])]) +
-                    normalize_list(res.get("keywords", []))
-                )
-                # each requested skill group must have at least one variant present
-                if not all(len(g & resume_tokens) > 0 for g in req_skill_groups):
-                    continue
-
-            strict_hits.append(res)
-
-        # ---------- 4. score & trim ----------
-        best_ids     = score_resumes(query, strict_hits)
-        best_resumes = [r for r in strict_hits if r["resumeId"] in best_ids][:top_k]
-
-        return {
-            "message"       : f"{len(best_resumes)} resumes matched ALL constraints.",
-            "results_count" : len(best_resumes),
-            "results"       : best_resumes,
-            "completed_at"  : datetime.utcnow().isoformat(),
-        }
-
+            coll = client[DB_NAME][COLL_NAME]
+            
+            # Start with a base pipeline
+            pipeline = []
+            
+            # STAGE 1: First filter by job titles (highest priority)
+            if job_titles and len(job_titles) > 0:
+                expanded_titles = expand(job_titles, TITLE_VARIANTS)
+                pipeline.append({
+                    "$match": {
+                        "jobExperiences.title": {"$in": expanded_titles}
+                    }
+                })
+            
+            # STAGE 2: Then filter by country (if provided)
+            if country:
+                country_values = COUNTRY_EQUIV.get(country.strip().lower(), [country])
+                pipeline.append({
+                    "$match": {
+                        "country": {"$in": country_values}
+                    }
+                })
+            
+            # STAGE 3: Filter by experience range
+            # Create experience calculation stage
+            exp_calculation_stage = {
+                "$addFields": {
+                    "totalExperience": {
+                        "$sum": {
+                            "$map": {
+                                "input": {"$ifNull": ["$jobExperiences", []]},
+                                "as": "job",
+                                "in": {
+                                    "$convert": {
+                                        "input": {"$ifNull": ["$job.duration", "0"]},
+                                        "to": "double",
+                                        "onError": 0,
+                                        "onNull": 0
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            pipeline.append(exp_calculation_stage)
+            
+            # Apply min experience filter if provided
+            if isinstance(min_experience_years, int) and min_experience_years > 0:
+                pipeline.append({
+                    "$match": {
+                        "totalExperience": {"$gte": min_experience_years}
+                    }
+                })
+            
+            # Apply max experience filter if provided
+            if isinstance(max_experience_years, int) and max_experience_years > 0:
+                pipeline.append({
+                    "$match": {
+                        "totalExperience": {"$lte": max_experience_years}
+                    }
+                })
+            
+            # STAGE 4: Finally filter by required skills (lowest priority but strict AND logic)
+            if skills and len(skills) > 0:
+                expanded_skills = expand(skills, SKILL_VARIANTS)
+                
+                # For each skill, create a condition requiring it to be present
+                skill_match_stages = []
+                for skill in expanded_skills:
+                    skill_match_stages.append({
+                        "$match": {
+                            "$or": [
+                                {"skills.skillName": skill},
+                                {"keywords": skill}
+                            ]
+                        }
+                    })
+                
+                # Add all skill matching stages to the pipeline
+                pipeline.extend(skill_match_stages)
+            
+            # STAGE 5: Limit results and project needed fields
+            pipeline.append({
+                "$project": {
+                    "_id": 0,
+                    "embedding": 0
+                }
+            })
+            
+            pipeline.append({"$limit": top_k})
+            
+            # DEBUG: If debug mode is on, print the pipeline
+            if debug_mode:
+                print(f"MongoDB Aggregation Pipeline: {json.dumps(pipeline, indent=2)}")
+            
+            # Execute the aggregation pipeline
+            candidates = list(coll.aggregate(pipeline))
+            
+            # If no candidates found, return empty results
+            if not candidates:
+                return {
+                    "message": "No resumes match the criteria.",
+                    "results_count": 0,
+                    "results": [],
+                    "completed_at": datetime.utcnow().isoformat(),
+                }
+            
+            # Use LLM to score and rank candidates
+            best_ids = score_resumes(query, candidates)
+            best_resumes = [r for r in candidates if r["resumeId"] in best_ids]
+            
+            # Return results
+            return {
+                "message": f"{len(best_resumes)} resumes after scoring from {len(candidates)} initial matches.",
+                "results_count": len(best_resumes),
+                "results": best_resumes,
+                "completed_at": datetime.utcnow().isoformat(),
+            }
     except PyMongoError as err:
         return {"error": f"DB error: {str(err)}"}
     except Exception as exc:
-        return {"error": str(exc)}
-        
+        return {"error": f"Query error: {str(exc)}"}
+
 
 @tool
 def send_email(to: str, subject: str, body: str) -> str:

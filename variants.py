@@ -20,7 +20,7 @@ COUNTRY_EQUIV = {
 }
 
 SKILL_VARIANTS = {
-    "sql": ["sql", "mysql", "microsoft sql server"],
+    "sql": ["sql", "mysql", "microsoft sql server","postgresql"],
     "python": ["Python", "py","python"],
     "javascript": ["javascript", "js", "java script"],
     "c#": ["c#", "c sharp", "csharp"],

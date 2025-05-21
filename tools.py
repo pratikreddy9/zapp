@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Constants
 SMTP_HOST, SMTP_PORT = "smtp.gmail.com", 465
 SMTP_USER, SMTP_PASS = st.secrets["SMTP_USER"], st.secrets["SMTP_PASS"]
-TOP_K_DEFAULT = 40
+TOP_K_DEFAULT = 50
 DB_NAME = "resumes_database"
 COLL_NAME = "resumes"
 
